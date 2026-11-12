@@ -380,6 +380,29 @@ test("Apple .strings: // line comments (single and consecutive) are kept per key
   );
 });
 
+test("Apple .strings: unquoted keys and \\Uxxxx escapes are read", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-strings-unquoted-"));
+  const file = path.join(root, "en.strings");
+  fs.writeFileSync(file, 'title = "Caf\\U00e9";\n"greeting" = "Hello";\n');
+  const doc = readLocaleDoc(file, "en");
+  assert.equal(JSON.stringify(doc.data), '{"title":"Café","greeting":"Hello"}');
+});
+
+test("Apple .strings: a UTF-16 (BOM) file is read like a UTF-8 one", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-strings-utf16-"));
+  const content = '"greeting" = "Caf\\U00e9!";\n"farewell" = "Goodbye";\n';
+
+  const le = path.join(root, "en.strings");
+  fs.writeFileSync(le, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(content, "utf16le")]));
+  assert.equal(JSON.stringify(readLocaleDoc(le, "en").data), '{"greeting":"Café!","farewell":"Goodbye"}');
+
+  const beBytes = Buffer.from(content, "utf16le");
+  for (let i = 0; i + 1 < beBytes.length; i += 2) [beBytes[i], beBytes[i + 1]] = [beBytes[i + 1], beBytes[i]];
+  const be = path.join(root, "fr.strings");
+  fs.writeFileSync(be, Buffer.concat([Buffer.from([0xfe, 0xff]), beBytes]));
+  assert.equal(JSON.stringify(readLocaleDoc(be, "fr").data), '{"greeting":"Café!","farewell":"Goodbye"}');
+});
+
 test("ARB: @key metadata and @@locale are not translatable and are reinserted; @@locale follows the target", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-arb-"));
   const file = path.join(root, "en.arb");

@@ -186,9 +186,12 @@ function readYamlDoc(file: string, text: string, tag: string): LocaleDoc {
 
 /** Apple .strings: `"key" = "value";`, optionally preceded by a `/* ... *\/` comment. */
 function unescapeC(s: string): string {
-  return s.replace(/\\(.)/g, (_, c: string) =>
-    ({ n: "\n", t: "\t", r: "\r", '"': '"', "\\": "\\" })[c] ?? c,
-  );
+  return s.replace(/\\(?:U([0-9a-fA-F]{4})|(.))/g, (_, hex: string | undefined, c: string | undefined) => {
+    // \Uxxxx is a UTF-16 code unit; two in a row combine into one character via
+    // ordinary JS string concatenation when they're a surrogate pair.
+    if (hex !== undefined) return String.fromCharCode(parseInt(hex, 16));
+    return ({ n: "\n", t: "\t", r: "\r", '"': '"', "\\": "\\" })[c!] ?? c!;
+  });
 }
 function escapeC(s: string): string {
   return s.replace(/[\\"\n\t\r]/g, (c) => ({ "\\": "\\\\", '"': '\\"', "\n": "\\n", "\t": "\\t", "\r": "\\r" })[c]!);
@@ -196,13 +199,16 @@ function escapeC(s: string): string {
 
 function readStringsDoc(file: string, text: string): LocaleDoc {
   // A key's preceding comment is either a /* ... */ block, or one or more consecutive // lines.
+  // The old NeXT/Apple plist-string format allows a bare, unquoted key (no spaces,
+  // "=" or ";") as well as a quoted one — Xcode itself only ever writes quoted keys,
+  // but hand-edited or third-party-exported .strings files sometimes have both.
   const PAIR =
-    /(?:((?:\/\*[\s\S]*?\*\/)|(?:\/\/[^\r\n]*(?:\r?\n[ \t]*\/\/[^\r\n]*)*))[ \t]*\r?\n+)?[ \t]*"((?:\\.|[^"\\])*)"\s*=\s*"((?:\\.|[^"\\])*)"\s*;/g;
+    /(?:((?:\/\*[\s\S]*?\*\/)|(?:\/\/[^\r\n]*(?:\r?\n[ \t]*\/\/[^\r\n]*)*))[ \t]*\r?\n+)?[ \t]*(?:"((?:\\.|[^"\\])*)"|([^\s"=;]+))\s*=\s*"((?:\\.|[^"\\])*)"\s*;/g;
   const data = newObj();
   const entries: Array<{ key: string; comment?: string }> = [];
   for (const m of text.matchAll(PAIR)) {
-    const key = unescapeC(m[2]);
-    data[key] = unescapeC(m[3]);
+    const key = m[2] !== undefined ? unescapeC(m[2]) : m[3];
+    data[key] = unescapeC(m[4]);
     entries.push({ key, comment: m[1] });
   }
   if (entries.length === 0 && text.trim() !== "") {
@@ -460,9 +466,28 @@ function readPoDoc(file: string, text: string): LocaleDoc {
   return { data, serialize };
 }
 
+/**
+ * Decodes a locale file's raw bytes to text, detecting a UTF-16 BOM first — Xcode's
+ * traditional default for `.strings` files, which `fs.readFileSync(file, "utf8")`
+ * would otherwise mangle into unreadable text (and then "no entries found").
+ */
+function readText(file: string): string {
+  const buf = fs.readFileSync(file);
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return buf.subarray(2).toString("utf16le");
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+    const swapped = Buffer.alloc(buf.length - 2);
+    for (let i = 2; i + 1 < buf.length; i += 2) {
+      swapped[i - 2] = buf[i + 1];
+      swapped[i - 1] = buf[i];
+    }
+    return swapped.toString("utf16le");
+  }
+  return buf.toString("utf8").replace(/^﻿/, "");
+}
+
 /** `tag` is the locale this file is for (the source tag, or an existing target's own tag). */
 export function readLocaleDoc(file: string, tag: string): LocaleDoc {
-  const text = fs.readFileSync(file, "utf8").replace(/^﻿/, "");
+  const text = readText(file);
   const ext = path.extname(file).toLowerCase();
   if (ext === ".yaml" || ext === ".yml") return readYamlDoc(file, text, tag);
   if (ext === ".po") return readPoDoc(file, text);
