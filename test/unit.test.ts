@@ -21,6 +21,7 @@ import {
   readLocaleDoc,
   sourceFiles,
   targetFile,
+  usesI18nextPlurals,
 } from "../src/locales.ts";
 import type { Translator } from "../src/models.ts";
 import { hasTranslatableText, mask, unmask } from "../src/placeholders.ts";
@@ -227,6 +228,15 @@ test("addPluralForms adds the forms the target language needs", () => {
   assert.equal(JSON.stringify(again.doc), JSON.stringify(ar.doc));
 });
 
+test("usesI18nextPlurals: only flat JSON/YAML, not .po/.arb/.strings", () => {
+  assert.equal(usesI18nextPlurals("locales/en/common.json"), true);
+  assert.equal(usesI18nextPlurals("locales/en.yaml"), true);
+  assert.equal(usesI18nextPlurals("locales/en.yml"), true);
+  assert.equal(usesI18nextPlurals("locales/en.po"), false);
+  assert.equal(usesI18nextPlurals("locales/en.arb"), false);
+  assert.equal(usesI18nextPlurals("locales/en.strings"), false);
+});
+
 test("pluralOneStrings: finds cardinal _one values, ignores ordinals and other categories", () => {
   const doc = {
     itemCount_one: "{{count}} item",
@@ -271,8 +281,13 @@ test("existingTargets: finds already-translated locales, dir and file layout", (
   fs.mkdirSync(path.join(root, "locales/en"), { recursive: true });
   fs.mkdirSync(path.join(root, "locales/fr"), { recursive: true });
   fs.mkdirSync(path.join(root, "locales/empty")); // no locale files inside: not a target
+  // Sibling folders that happen to hold locale-shaped files but aren't locales.
+  fs.mkdirSync(path.join(root, "locales/__mocks__"));
+  fs.mkdirSync(path.join(root, "locales/schemas"));
   fs.writeFileSync(path.join(root, "locales/en/common.json"), "{}");
   fs.writeFileSync(path.join(root, "locales/fr/common.json"), "{}");
+  fs.writeFileSync(path.join(root, "locales/__mocks__/common.json"), "{}");
+  fs.writeFileSync(path.join(root, "locales/schemas/common.json"), "{}");
   const l = detectLayout(root, "en");
   assert.deepEqual(existingTargets(l, "en"), ["fr"]);
 
@@ -280,6 +295,7 @@ test("existingTargets: finds already-translated locales, dir and file layout", (
   fs.writeFileSync(path.join(fileRoot, "en.json"), "{}");
   fs.writeFileSync(path.join(fileRoot, "fr.json"), "{}");
   fs.writeFileSync(path.join(fileRoot, "de.json"), "{}");
+  fs.writeFileSync(path.join(fileRoot, "schema.json"), "{}");
   const f = detectLayout(fileRoot, "en");
   assert.deepEqual(existingTargets(f, "en"), ["de", "fr"]);
 });

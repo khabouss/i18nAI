@@ -30,6 +30,7 @@ import {
   readLocaleDoc,
   sourceFiles,
   targetFile,
+  usesI18nextPlurals,
   type LocaleDoc,
 } from "./locales.ts";
 import {
@@ -44,7 +45,7 @@ import {
   type InstallPlan,
   type Translator,
 } from "./models.ts";
-import { mask } from "./placeholders.ts";
+import { hasTranslatableText, mask } from "./placeholders.ts";
 
 /** Read from package.json so `npm version` is the single source of truth. */
 const VERSION: string = JSON.parse(
@@ -317,16 +318,16 @@ async function cmdTranslate(argv: string[]): Promise<number> {
         }
       }
       const built = buildTarget(f.doc.data, f.existing, (s) => translations.get(s) ?? s, values.overwrite!, isProtectedKey, isStale);
-      const { doc, added } = addPluralForms(built, intlCode(job.locale));
-      pluralsAdded += added;
+      const plural = usesI18nextPlurals(f.source) ? addPluralForms(built, intlCode(job.locale)) : { doc: built, added: 0 };
+      pluralsAdded += plural.added;
       const before = fs.existsSync(f.target) ? fs.readFileSync(f.target, "utf8") : undefined;
-      const text = f.doc.serialize(doc, job.locale.tag, before);
+      const text = f.doc.serialize(plural.doc, job.locale.tag, before);
       if (text !== before) {
         fs.mkdirSync(path.dirname(f.target), { recursive: true });
         fs.writeFileSync(f.target, text);
         written++;
       }
-      const outFlat = new Map(flattenStrings(doc).map((e) => [e.path, e.value]));
+      const outFlat = new Map(flattenStrings(plural.doc).map((e) => [e.path, e.value]));
       recordEntries(
         lock,
         lockKey,
@@ -486,9 +487,11 @@ async function cmdCheck(argv: string[]): Promise<number> {
   }
 
   let problems = 0;
+  let identicalTotal = 0;
   for (const to of targets) {
     let missing = 0;
     let mismatched = 0;
+    let identical = 0;
     for (const { file, doc } of sources) {
       const target = targetFile(layout, from.tag, to, file);
       if (!fs.existsSync(target)) {
@@ -505,17 +508,24 @@ async function cmdCheck(argv: string[]): Promise<number> {
           log(`✗ ${to}: ${rel(target)} missing key "${p}"`);
           continue;
         }
-        const srcTokens = mask(srcVal, "natural").tokens.toSorted();
+        const srcMasked = mask(srcVal, "natural");
         const tgtTokens = mask(tgtVal, "natural").tokens.toSorted();
-        if (srcTokens.join("\u0001") !== tgtTokens.join("\u0001")) {
+        if (srcMasked.tokens.toSorted().join("\u0001") !== tgtTokens.join("\u0001")) {
           mismatched++;
-          log(`✗ ${to}: ${rel(target)} "${p}" placeholders differ: source [${srcTokens.join(", ")}], target [${tgtTokens.join(", ")}]`);
+          log(`✗ ${to}: ${rel(target)} "${p}" placeholders differ: source [${srcMasked.tokens.toSorted().join(", ")}], target [${tgtTokens.join(", ")}]`);
+          continue;
+        }
+        if (tgtVal === srcVal && hasTranslatableText(srcMasked.text)) {
+          identical++;
+          log(`⚠ ${to}: ${rel(target)} "${p}" is untouched, identical to the ${from.tag} source`);
         }
       }
     }
+    identicalTotal += identical;
     if (missing || mismatched) problems++;
-    else log(`✓ ${to}`);
+    else log(`✓ ${to}${identical ? ` (${identical} left identical to ${from.tag})` : ""}`);
   }
+  if (identicalTotal) log(`\n${identicalTotal} string${identicalTotal === 1 ? "" : "s"} left identical to the source — not a failure, but worth a look.`);
   return problems ? 1 : 0;
 }
 

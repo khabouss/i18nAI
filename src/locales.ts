@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { parseLocale } from "./lang.ts";
 
 /**
  * Supported layouts:
@@ -99,6 +100,16 @@ export function targetFile(layout: Layout, from: string, to: string, src: string
   return path.join(layout.root, to, path.relative(path.join(layout.root, from), src));
 }
 
+/** True when `tag` parses as a locale (e.g. "fr", "pt-BR") — rejects names like "__mocks__" or "schemas". */
+function looksLikeLocale(tag: string): boolean {
+  try {
+    parseLocale(tag);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Locale tags already translated alongside `from` in this layout (for `locale-ai check`). */
 export function existingTargets(layout: Layout, from: string): string[] {
   if (layout.kind === "file") {
@@ -107,12 +118,14 @@ export function existingTargets(layout: Layout, from: string): string[] {
       .readdirSync(layout.root)
       .filter((f) => f.endsWith(ext) && f.slice(0, -ext.length) !== from)
       .map((f) => f.slice(0, -ext.length))
+      .filter(looksLikeLocale)
       .sort();
   }
   return fs
     .readdirSync(layout.root, { withFileTypes: true })
     .filter((e) => e.isDirectory() && !e.name.startsWith(".") && e.name !== "node_modules" && e.name !== from)
     .map((e) => e.name)
+    .filter(looksLikeLocale)
     .filter((name) => listLocaleFiles(path.join(layout.root, name)).length > 0)
     .sort();
 }
@@ -573,6 +586,16 @@ export function pluralOneStrings(data: unknown, out: Set<string> = new Set()): S
   };
   visit(data);
   return out;
+}
+
+/**
+ * True for the file extensions that use i18next's `key_one`/`key_other` plural-key
+ * convention (flat JSON/YAML locale trees). A `.po`, `.arb` or `.strings` file might
+ * happen to have a key ending the same way without meaning it as an i18next plural,
+ * so addPluralForms should only ever run on these.
+ */
+export function usesI18nextPlurals(file: string): boolean {
+  return /\.(json|ya?ml)$/i.test(file);
 }
 
 /**

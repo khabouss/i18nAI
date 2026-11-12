@@ -9,6 +9,15 @@
 // onnxruntime-node has finished installing, shrinking a ~550 MB unpacked
 // dependency down to the one binary locale-ai actually loads.
 //
+// Node's resolution can hoist onnxruntime-node to a node_modules shared with
+// other packages, so this only trims when nothing else next to it in that
+// same node_modules also depends on it — another consumer there might need a
+// GPU provider, or run on a different platform than this machine (e.g. a
+// node_modules folder built here and later mounted into a container). Set
+// LOCALE_AI_SKIP_TRIM=1 to disable this entirely, e.g. if node_modules is
+// going to be reused somewhere this check can't see (a different machine, a
+// Docker image built from it later).
+//
 // Best-effort: never fails the install, even if onnxruntime-node changes
 // its layout in a future version.
 
@@ -23,9 +32,44 @@ function rm(p) {
   }
 }
 
+/** Any OTHER package in `nodeModulesDir` that itself depends on onnxruntime-node. */
+function hasOtherConsumer(nodeModulesDir) {
+  let entries;
+  try {
+    entries = fs.readdirSync(nodeModulesDir, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name === 'onnxruntime-node' || e.name === '.bin') continue;
+    const names = e.name.startsWith('@')
+      ? fs.readdirSync(path.join(nodeModulesDir, e.name), { withFileTypes: true })
+          .filter((s) => s.isDirectory())
+          .map((s) => `${e.name}/${s.name}`)
+      : [e.name];
+    for (const name of names) {
+      if (name === 'locale-ai') continue;
+      try {
+        const pkg = JSON.parse(fs.readFileSync(path.join(nodeModulesDir, name, 'package.json'), 'utf8'));
+        const deps = { ...pkg.dependencies, ...pkg.optionalDependencies, ...pkg.peerDependencies };
+        if (deps && 'onnxruntime-node' in deps) return true;
+      } catch {
+        // Not a real package (or unreadable) — ignore.
+      }
+    }
+  }
+  return false;
+}
+
+if (process.env.LOCALE_AI_SKIP_TRIM) process.exit(0);
+
 try {
   const pkgJson = require.resolve('onnxruntime-node/package.json');
-  const binRoot = path.join(path.dirname(pkgJson), 'bin', 'napi-v6');
+  const onnxRoot = path.dirname(pkgJson);
+  const nodeModulesDir = path.dirname(onnxRoot);
+  if (hasOtherConsumer(nodeModulesDir)) process.exit(0);
+
+  const binRoot = path.join(onnxRoot, 'bin', 'napi-v6');
   if (!fs.existsSync(binRoot)) process.exit(0);
 
   const platform = process.platform;

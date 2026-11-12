@@ -51,6 +51,7 @@ Download 577 MB? (Y/n)
 ```bash
 locale-ai translate --to fr,pt-BR [--from en] [--input dir] [--dry-run] [--overwrite] [--fast] [--report file] [-y]
 locale-ai check [--from en] [--input dir]   # CI: fails if a translated locale has missing keys or placeholder mismatches
+                                             # (also warns, without failing, about strings left identical to the source)
 locale-ai models list [--from en]     # supported language pairs
 locale-ai models installed
 locale-ai models install en-de        # pre-download (e.g. in CI)
@@ -61,6 +62,8 @@ locale-ai models convert <hf-marian-model> --out <dir>   # bring your own model 
 `translate` uses beam search (4 beams) by default. `--fast` uses greedy decoding: 2–3x faster, about 0.5 chrF lower.
 
 Models are cached once per machine in `~/.cache/locale-ai` (`LOCALE_AI_CACHE` to change). In CI, pass `--yes`.
+
+Installing trims the `onnxruntime-node` dependency down to the one CPU binary locale-ai actually loads (it ships binaries for every platform/arch plus GPU providers locale-ai never uses) — but only when nothing else in your `node_modules` also depends on it, so a shared copy another package needs for GPU inference is left alone. Set `LOCALE_AI_SKIP_TRIM=1` to disable this entirely.
 
 ## Project config (optional)
 
