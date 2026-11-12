@@ -15,7 +15,7 @@ npx locale-ai translate --from en --to fr,es,de
 ```
 
 ```
-locale-ai 0.2.0
+locale-ai 0.6.3
 Found 3 en files in locales/en/
 Models to download (one time, then cached for every project):
   en-fr         345 MB  khabouss/opus-mt-tc-big-en-fr-onnx
@@ -102,24 +102,24 @@ then declare it in `locale-ai.config.json`:
 - `prefix` is required for multi-target models (`convert` lists the model's `>>xx<<` tokens).
 - Project models take priority over built-ins for their language pairs and can be used for pivoting (e.g. `ja → en → tr`).
 
-**Recommended for quality**: the `opus-mt-tc-big-en-*` models (es, it, pt, ar, tr, and `zle` for ru/uk). They are ~3x larger (270–370 MB int8) and ~1.5x slower, and clearly better. `en-fr` already uses one of these as its built-in model (see [Languages](#languages)), hosted at [khabouss/opus-mt-tc-big-en-fr-onnx](https://huggingface.co/khabouss/opus-mt-tc-big-en-fr-onnx) — no conversion needed for it.
+**Already built-in, no conversion needed**: `fr`, `es`, `it`, `pt`, `ar` and `tr` all use the larger, clearly-better `opus-mt-tc-big-en-*` checkpoints as their built-in model (~3x larger, 270–370 MB int8, ~1.5x slower than the plain OPUS-MT default); `ru`/`uk` use the tc-big `zle` multi-target checkpoint, and `pl` uses Helsinki-NLP's multi-target Slavic model (no tc-big `en-pl` checkpoint exists). The section above is for adding a language or model that *isn't* already built in.
 
-| Target | Built-in model, chrF / BLEU | tc-big model, chrF / BLEU |
+| Target | Previous (plain OPUS-MT), chrF / BLEU | Built-in today (tc-big / better), chrF / BLEU |
 |---|---|---|
+| fr | 68.9 / 53.7 | **72.5 / 55.9** |
 | es | 72.9 / 56.9 | **73.6 / 57.4** |
 | it | 73.8 / 54.9 | **75.3 / 58.2** |
 | pt | 68.3 / 44.4 | **70.6 / 47.7** (`>>por<<`, or `>>pob<<` for pt-BR) |
 | ru | 65.7 / 46.0 | **68.2 / 48.1** (`>>rus<<`) |
 | ar | 47.8 / 16.6 | **49.7 / 19.9** (`>>ara<<`, with `--fast`) |
-| tr | — | **67.4 / 42.1** |
+| tr | — | **67.4 / 42.1** (not supported before) |
+| pl | — | **62.6 / 40.3** (`>>pol<<`, not supported before) |
 
 300 Tatoeba test sentences per language, int8, beam 4 unless noted; reproduce with `bench/` (see `bench/README.md`). `opus-mt-tc-big-en-ko` is broken upstream (garbage output even in PyTorch) and is not recommended.
 
-Also new: **pl** (chrF 62.6 / BLEU 40.3, `>>pol<<`), hosted at [khabouss/opus-mt-en-sla-onnx](https://huggingface.co/khabouss/opus-mt-en-sla-onnx) — no tc-big `en-pl` checkpoint exists, so this uses Helsinki-NLP's multi-target Slavic model instead.
-
 ## Languages
 
-From English: af, ar, ca, cs, da, de, es, fi, fr, gl, hi, hu, id, it, nl, oc, pl, pt (pt-BR, pt-PT), ro, ru, sv, uk, vi, xh, zh (zh-CN, zh-TW). Other source languages are supported directly or through English (`locale-ai models list --from fr`).
+From English: af, ar, ca, cs, da, de, es, fi, fr, gl, hi, hu, id, it, nl, oc, pl, pt (pt-BR, pt-PT), ro, ru, sv, tr, uk, vi, xh, zh (zh-CN, zh-TW). Other source languages are supported directly or through English (`locale-ai models list --from fr`).
 
 Measured on a sample app (see `test/fixtures`):
 
@@ -129,7 +129,7 @@ Measured on a sample app (see `test/fixtures`):
 | Usable — review before shipping | it, ar, ru, pl, zh-CN, zh-TW |
 | Untested | the other pairs in `locale-ai models list` |
 
-`en-fr` is already on the tc-big model (chrF 72.5 / BLEU 55.9) as a built-in, no config needed. With the other tc-big models above, it, ar and ru move up a tier, and tr and pl become available. Not available yet: ja, ko and others; he works with a converted `opus-mt-en-he` (weaker). Moroccan Arabic (Darija): the tc-big en-ar model has a `>>ary<<` token, but its output is close to Modern Standard Arabic — not supported.
+`fr`, `es`, `it`, `pt`, `ar`, `ru`/`uk`, `tr` and `pl` all ship on the tc-big (or better) models above as built-ins already — no config needed. Not available yet: ja, ko and others; he works with a converted `opus-mt-en-he` (weaker). Moroccan Arabic (Darija): the tc-big en-ar model has a `>>ary<<` token, but its output is close to Modern Standard Arabic — not supported.
 
 ## How it works
 
