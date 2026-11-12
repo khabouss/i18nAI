@@ -8,6 +8,7 @@ import { translateStrings } from "../src/engine.ts";
 import { extractIcu } from "../src/icu.ts";
 import { extractPipePlural } from "../src/vue-plural.ts";
 import { parseLocale } from "../src/lang.ts";
+import { editedPaths, hashOf, isSourceStale, loadLock, recordEntries, saveLock } from "../src/lock.ts";
 import {
   addPluralForms,
   buildTarget,
@@ -173,6 +174,43 @@ test("keyPathProtect: protects an exact path and everything nested under it (an 
 
   assert.equal(keyPathProtect(undefined), undefined);
   assert.equal(keyPathProtect([]), undefined);
+});
+
+test("pendingStrings/buildTarget: isStale forces re-translation of a non-empty target", () => {
+  const src = { a: "Hello", b: "World" };
+  const existing = { a: "Bonjour", b: "Monde" };
+  const isStale = (p: string) => p === "a";
+  assert.deepEqual(pendingStrings(src, existing, false, undefined, isStale), ["Hello"]);
+  const built = buildTarget(src, existing, (s) => `[${s}]`, false, undefined, isStale);
+  assert.equal(JSON.stringify(built), JSON.stringify({ a: "[Hello]", b: "Monde" }));
+});
+
+test("lock: a source edit is detected as stale; a translator edit is flagged, not stale", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-lock-"));
+  const file = path.join(dir, "locale-ai.lock.json");
+  assert.deepEqual(loadLock(file), { version: 1, files: {} });
+
+  const lock = loadLock(file);
+  recordEntries(lock, "en.json", "fr", [{ path: "welcome", source: "Welcome back!", written: "Bon retour !" }]);
+  assert.equal(isSourceStale(lock, "en.json", "welcome", "Welcome back!"), false);
+  assert.deepEqual(editedPaths(lock, "en.json", "fr", [{ path: "welcome", value: "Bon retour !" }]), []);
+
+  // The English source changed: stale regardless of what the target currently holds.
+  assert.equal(isSourceStale(lock, "en.json", "welcome", "Welcome back, friend!"), true);
+
+  // The target was hand-edited while the source stayed the same: flagged, not "stale".
+  assert.deepEqual(editedPaths(lock, "en.json", "fr", [{ path: "welcome", value: "Re-bonjour !" }]), ["welcome"]);
+  assert.equal(isSourceStale(lock, "en.json", "welcome", "Welcome back!"), false);
+
+  // A path the lock has never recorded (new key, or adopting the lockfile on an
+  // existing project) is never reported as stale or edited.
+  assert.equal(isSourceStale(lock, "en.json", "brandNew", "Something new"), false);
+  assert.deepEqual(editedPaths(lock, "en.json", "fr", [{ path: "brandNew", value: "Nouveau" }]), []);
+
+  saveLock(file, lock);
+  assert.deepEqual(loadLock(file), lock);
+  assert.equal(hashOf("x"), hashOf("x"));
+  assert.notEqual(hashOf("x"), hashOf("y"));
 });
 
 test("addPluralForms adds the forms the target language needs", () => {

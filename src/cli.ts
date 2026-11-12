@@ -17,6 +17,7 @@ import {
 import { translateStrings, type Issue } from "./engine.ts";
 import { CONFIG_FILE, glossaryLookup, loadConfig, protectRegex, type ProjectConfig } from "./glossary.ts";
 import { intlCode, parseLocale, type Locale } from "./lang.ts";
+import { editedPaths, isSourceStale, LOCK_FILENAME, loadLock, recordEntries, saveLock } from "./lock.ts";
 import {
   addPluralForms,
   buildTarget,
@@ -90,6 +91,8 @@ const endStatus = () => {
 
 const mb = (bytes: number) => `${Math.round(bytes / 1e6)} MB`;
 const rel = (p: string) => path.relative(process.cwd(), p) || ".";
+/** Portable lock-file key: forward slashes regardless of platform. */
+const fileKey = (p: string) => rel(p).split(path.sep).join("/");
 
 /**
  * `Number("abc")` is NaN, and NaN silently poisons everything downstream (an
@@ -209,6 +212,8 @@ async function cmdTranslate(argv: string[]): Promise<number> {
   const protect = protectRegex(config);
   const isProtectedKey = keyPathProtect(config.doNotTranslateKeys);
   const layout = detectLayout(process.cwd(), from.tag, values.input);
+  const lockPath = path.resolve(process.cwd(), LOCK_FILENAME);
+  const lock = loadLock(lockPath);
   const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag) }));
   const singularHints = new Set(sources.flatMap(({ doc }) => [...pluralOneStrings(doc.data)]));
   log(`locale-ai ${VERSION}`);
@@ -231,12 +236,13 @@ async function cmdTranslate(argv: string[]): Promise<number> {
     const files = sources.map(({ file, doc }): FileJob => {
       const target = targetFile(layout, from.tag, locale.tag, file);
       const existing = fs.existsSync(target) ? readLocaleDoc(target, locale.tag).data : undefined;
+      const isStale = (p: string, s: string) => isSourceStale(lock, fileKey(file), p, s);
       return {
         source: file,
         target,
         doc,
         existing,
-        pending: pendingStrings(doc.data, existing, values.overwrite!, isProtectedKey),
+        pending: pendingStrings(doc.data, existing, values.overwrite!, isProtectedKey, isStale),
       };
     });
     const unique = new Set(files.flatMap((f) => f.pending)).size;
@@ -303,7 +309,14 @@ async function cmdTranslate(argv: string[]): Promise<number> {
     let written = 0;
     let pluralsAdded = 0;
     for (const f of job.files) {
-      const built = buildTarget(f.doc.data, f.existing, (s) => translations.get(s) ?? s, values.overwrite!, isProtectedKey);
+      const lockKey = fileKey(f.source);
+      const isStale = (p: string, s: string) => isSourceStale(lock, lockKey, p, s);
+      if (f.existing !== undefined) {
+        for (const editedPath of editedPaths(lock, lockKey, job.locale.tag, flattenStrings(f.existing))) {
+          allIssues.push({ source: editedPath, kind: "edited", locale: job.locale.tag });
+        }
+      }
+      const built = buildTarget(f.doc.data, f.existing, (s) => translations.get(s) ?? s, values.overwrite!, isProtectedKey, isStale);
       const { doc, added } = addPluralForms(built, intlCode(job.locale));
       pluralsAdded += added;
       const before = fs.existsSync(f.target) ? fs.readFileSync(f.target, "utf8") : undefined;
@@ -313,6 +326,13 @@ async function cmdTranslate(argv: string[]): Promise<number> {
         fs.writeFileSync(f.target, text);
         written++;
       }
+      const outFlat = new Map(flattenStrings(doc).map((e) => [e.path, e.value]));
+      recordEntries(
+        lock,
+        lockKey,
+        job.locale.tag,
+        flattenStrings(f.doc.data).map(({ path: p, value }) => ({ path: p, source: value, written: outFlat.get(p) ?? "" })),
+      );
     }
     const secs = ((Date.now() - started) / 1000).toFixed(1);
     const issues = allIssues.filter((i) => i.locale === job.locale.tag).length;
@@ -324,6 +344,7 @@ async function cmdTranslate(argv: string[]): Promise<number> {
     );
   }
   for (const t of loaded.values()) await t.dispose();
+  if (jobs.length) saveLock(lockPath, lock);
 
   if (allIssues.length) {
     log();

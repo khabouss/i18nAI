@@ -498,11 +498,12 @@ export function pendingStrings(
   existing: unknown,
   overwrite: boolean,
   isProtected?: (path: string) => boolean,
+  isStale?: (path: string, source: string) => boolean,
 ): string[] {
   const out: string[] = [];
   const visit = (s: unknown, e: unknown, path: string): void => {
     if (typeof s === "string") {
-      if (!isProtected?.(path) && needsTranslation(e, overwrite)) out.push(s);
+      if (!isProtected?.(path) && (needsTranslation(e, overwrite) || !!isStale?.(path, s))) out.push(s);
     } else if (Array.isArray(s)) {
       s.forEach((v, i) => visit(v, Array.isArray(e) ? e[i] : undefined, `${path}[${i}]`));
     } else if (isObj(s)) {
@@ -515,9 +516,12 @@ export function pendingStrings(
 
 /**
  * Builds the target document: source structure and key order, existing
- * translations kept (unless overwrite), new strings from `translate`, and keys
- * that only exist in the target preserved at the end. A string at a protected
- * path (see keyPathProtect) is always copied from the source verbatim.
+ * translations kept (unless overwrite or stale), new strings from `translate`,
+ * and keys that only exist in the target preserved at the end. A string at a
+ * protected path (see keyPathProtect) is always copied from the source
+ * verbatim. `isStale` (see the lock module) forces re-translation of a
+ * non-empty target when its source string has changed since it was last
+ * translated.
  */
 export function buildTarget(
   source: unknown,
@@ -525,11 +529,12 @@ export function buildTarget(
   translate: (s: string) => string,
   overwrite: boolean,
   isProtected?: (path: string) => boolean,
+  isStale?: (path: string, source: string) => boolean,
 ): unknown {
   const visit = (s: unknown, e: unknown, path: string): unknown => {
     if (typeof s === "string") {
       if (isProtected?.(path)) return s;
-      return needsTranslation(e, overwrite) ? translate(s) : e;
+      return needsTranslation(e, overwrite) || isStale?.(path, s) ? translate(s) : e;
     }
     if (Array.isArray(s)) return s.map((v, i) => visit(v, Array.isArray(e) ? e[i] : undefined, `${path}[${i}]`));
     if (isObj(s)) {
