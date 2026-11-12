@@ -85,6 +85,16 @@ export const CATALOG: ModelEntry[] = [
     prefix: (t) => (t.lang === "ru" ? ">>rus<<" : ">>ukr<<"),
   },
   {
+    // New: Polish, not supported by any built-in model before this. The tc-big
+    // family has no en-pl checkpoint; this is Helsinki-NLP's multi-target Slavic
+    // model, used for its >>pol<< target only.
+    id: "en-pl",
+    repo: "khabouss/opus-mt-en-sla-onnx", // chrF 62.6, BLEU 40.3
+    sources: ["en"],
+    targets: ["pl"],
+    prefix: () => ">>pol<<",
+  },
+  {
     // Note: the model card lists Moroccan Arabic ("ary") but its output stays close
     // to Modern Standard Arabic, so Darija is not treated as supported.
     ...pair("en", "ar"),

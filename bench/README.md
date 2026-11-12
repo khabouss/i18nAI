@@ -2,7 +2,7 @@
 
 `tatoeba-sample.json`: 300 random sentence pairs per language (seed 42) from the
 [Tatoeba-Challenge](https://github.com/Helsinki-NLP/Tatoeba-Challenge) test sets
-(CC-BY 2.0), English → fr, es, de, it, pt, ru, zh (cmn_Hans), ar (ara), nl, ko, tr, ja.
+(CC-BY 2.0), English → fr, es, de, it, pt, ru, zh (cmn_Hans), ar (ara), nl, ko, tr, ja, pl.
 
 ```bash
 # translate with a model folder (cache dir, converted folder, ...)

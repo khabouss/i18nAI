@@ -111,19 +111,21 @@ then declare it in `locale-ai.config.json`:
 
 300 Tatoeba test sentences per language, int8, beam 4 unless noted; reproduce with `bench/` (see `bench/README.md`). `opus-mt-tc-big-en-ko` is broken upstream (garbage output even in PyTorch) and is not recommended.
 
+Also new: **pl** (chrF 62.6 / BLEU 40.3, `>>pol<<`), hosted at [khabouss/opus-mt-en-sla-onnx](https://huggingface.co/khabouss/opus-mt-en-sla-onnx) — no tc-big `en-pl` checkpoint exists, so this uses Helsinki-NLP's multi-target Slavic model instead.
+
 ## Languages
 
-From English: af, ar, ca, cs, da, de, es, fi, fr, gl, hi, hu, id, it, nl, oc, pt (pt-BR, pt-PT), ro, ru, sv, uk, vi, xh, zh (zh-CN, zh-TW). Other source languages are supported directly or through English (`locale-ai models list --from fr`).
+From English: af, ar, ca, cs, da, de, es, fi, fr, gl, hi, hu, id, it, nl, oc, pl, pt (pt-BR, pt-PT), ro, ru, sv, uk, vi, xh, zh (zh-CN, zh-TW). Other source languages are supported directly or through English (`locale-ai models list --from fr`).
 
 Measured on a sample app (see `test/fixtures`):
 
 | Quality (built-in models) | Languages |
 |---|---|
 | Good — light review | fr, es, de, pt-BR, nl |
-| Usable — review before shipping | it, ar, ru, zh-CN, zh-TW |
+| Usable — review before shipping | it, ar, ru, pl, zh-CN, zh-TW |
 | Untested | the other pairs in `locale-ai models list` |
 
-`en-fr` is already on the tc-big model (chrF 72.5 / BLEU 55.9) as a built-in, no config needed. With the other tc-big models above, it, ar and ru move up a tier and tr becomes available. Not available yet: ja, ko, pl and others; he works with a converted `opus-mt-en-he` (weaker). Moroccan Arabic (Darija): the tc-big en-ar model has a `>>ary<<` token, but its output is close to Modern Standard Arabic — not supported.
+`en-fr` is already on the tc-big model (chrF 72.5 / BLEU 55.9) as a built-in, no config needed. With the other tc-big models above, it, ar and ru move up a tier, and tr and pl become available. Not available yet: ja, ko and others; he works with a converted `opus-mt-en-he` (weaker). Moroccan Arabic (Darija): the tc-big en-ar model has a `>>ary<<` token, but its output is close to Modern Standard Arabic — not supported.
 
 ## How it works
 
@@ -150,5 +152,5 @@ npm run build       # → dist/
 
 ## Next steps
 
-1. **More languages**: ja, ko, pl have no usable OPUS-MT model yet; a different model family would be needed.
+1. **More languages**: ja, ko have no usable OPUS-MT model yet; a different model family would be needed.
 2. **More formats**: `.po` (gettext), ARB (Flutter), Apple `.strings`. (JSON and YAML are supported today.)
