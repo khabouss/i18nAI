@@ -21,6 +21,8 @@ import {
   addPluralForms,
   buildTarget,
   detectLayout,
+  existingTargets,
+  flattenStrings,
   pendingStrings,
   readLocaleDoc,
   sourceFiles,
@@ -39,6 +41,7 @@ import {
   type InstallPlan,
   type Translator,
 } from "./models.ts";
+import { mask } from "./placeholders.ts";
 
 /** Read from package.json so `npm version` is the single source of truth. */
 const VERSION: string = JSON.parse(
@@ -49,6 +52,10 @@ const HELP = `locale-ai ${VERSION} — translate i18n locale files locally, on C
 
 Usage:
   locale-ai translate --to <locales> [options]
+  locale-ai check [--from <locale>]
+                        Validate that already-translated locales have the same keys and
+                        placeholders as the source, without translating. Exits non-zero
+                        on a mismatch (CI-friendly).
   locale-ai models list [--from <locale>]
   locale-ai models installed
   locale-ai models install <from-to | model-id> [--yes]
@@ -423,11 +430,70 @@ async function cmdModels(argv: string[]): Promise<number> {
   }
 }
 
+/**
+ * Validates already-translated locales against the source without translating:
+ * same key structure, and the same placeholders in each matching string. Meant for
+ * CI, so a mismatch (a key a translator dropped, a {name} a translation lost) fails
+ * the build instead of shipping silently.
+ */
+async function cmdCheck(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      from: { type: "string", default: "en" },
+      input: { type: "string" },
+    },
+  });
+  const from = parseLocale(values.from!);
+  const layout = detectLayout(process.cwd(), from.tag, values.input);
+  const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag) }));
+  const targets = existingTargets(layout, from.tag);
+  if (!targets.length) {
+    log(`No translated locales found next to ${from.tag}.`);
+    return 0;
+  }
+
+  let problems = 0;
+  for (const to of targets) {
+    let missing = 0;
+    let mismatched = 0;
+    for (const { file, doc } of sources) {
+      const target = targetFile(layout, from.tag, to, file);
+      if (!fs.existsSync(target)) {
+        missing += flattenStrings(doc.data).length;
+        log(`✗ ${to}: ${rel(target)} is missing entirely`);
+        continue;
+      }
+      const srcFlat = flattenStrings(doc.data);
+      const tgtByPath = new Map(flattenStrings(readLocaleDoc(target, to).data).map((e) => [e.path, e.value]));
+      for (const { path: p, value: srcVal } of srcFlat) {
+        const tgtVal = tgtByPath.get(p);
+        if (tgtVal === undefined) {
+          missing++;
+          log(`✗ ${to}: ${rel(target)} missing key "${p}"`);
+          continue;
+        }
+        const srcTokens = mask(srcVal, "natural").tokens.toSorted();
+        const tgtTokens = mask(tgtVal, "natural").tokens.toSorted();
+        if (srcTokens.join("\u0001") !== tgtTokens.join("\u0001")) {
+          mismatched++;
+          log(`✗ ${to}: ${rel(target)} "${p}" placeholders differ: source [${srcTokens.join(", ")}], target [${tgtTokens.join(", ")}]`);
+        }
+      }
+    }
+    if (missing || mismatched) problems++;
+    else log(`✓ ${to}`);
+  }
+  return problems ? 1 : 0;
+}
+
 async function main(): Promise<number> {
   const [cmd, ...rest] = process.argv.slice(2);
   switch (cmd) {
     case "translate":
       return cmdTranslate(rest);
+    case "check":
+      return cmdCheck(rest);
     case "models":
       return cmdModels(rest);
     case "-v":

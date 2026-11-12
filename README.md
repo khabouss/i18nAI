@@ -35,7 +35,7 @@ Download 577 MB? (Y/n)
 - **Incremental**: only missing keys are translated, existing translations are kept, re-runs are no-ops. `--overwrite` re-translates everything.
 - **Structure**: key order, numbers, booleans, arrays, indentation and trailing newline are preserved.
 
-**Format notes**: for `.po`, `msgid` is the stable key (never changed) and `msgstr` is the translated value, as gettext expects — the English `.po` file's `msgstr` must hold the source text (most generators already fill it; an empty `msgstr` is treated as empty, not inherited from `msgid`), and `msgid_plural`/`msgstr[n]` plural entries pass through untranslated (translate those by hand, or use ICU plurals in `.arb`/JSON/YAML instead). For `.arb`, `@key` metadata and `@@locale` are never translated; `@@locale` is set to the target locale on output.
+**Format notes**: for `.po`, `msgid` is the stable key (never changed) and `msgstr` is the translated value, as gettext expects — the English `.po` file's `msgstr` must hold the source text (most generators already fill it; an empty `msgstr` is treated as empty, not inherited from `msgid`). `msgid_plural`/`msgstr[n]` plural entries are translated too (the singular and plural source forms), then expanded to however many `msgstr[n]` the target language's plural rules need (6 for Arabic, 1 for Japanese, ...) — not full grammatical inflection for in-between categories (`few`/`many`/...), which get the plural-sourced translation verbatim, the same simplification `addPluralForms` makes for i18next. `Plural-Forms` in the header is computed for the target language, not copied from the source; an existing target file's header is otherwise left as you last edited it (a hand-fixed `Plural-Forms`, `Last-Translator`, ...) instead of being regenerated on every rerun. For `.arb`, `@key` metadata and `@@locale` are never translated; `@@locale` is set to the target locale on output.
 
 ## Why locale-ai?
 
@@ -50,6 +50,7 @@ Download 577 MB? (Y/n)
 
 ```bash
 locale-ai translate --to fr,pt-BR [--from en] [--input dir] [--dry-run] [--overwrite] [--fast] [--report file] [-y]
+locale-ai check [--from en] [--input dir]   # CI: fails if a translated locale has missing keys or placeholder mismatches
 locale-ai models list [--from en]     # supported language pairs
 locale-ai models installed
 locale-ai models install en-de        # pre-download (e.g. in CI)

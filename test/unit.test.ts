@@ -8,7 +8,17 @@ import { translateStrings } from "../src/engine.ts";
 import { extractIcu } from "../src/icu.ts";
 import { extractPipePlural } from "../src/vue-plural.ts";
 import { parseLocale } from "../src/lang.ts";
-import { addPluralForms, buildTarget, detectLayout, pendingStrings, readLocaleDoc, sourceFiles, targetFile } from "../src/locales.ts";
+import {
+  addPluralForms,
+  buildTarget,
+  detectLayout,
+  existingTargets,
+  flattenStrings,
+  pendingStrings,
+  readLocaleDoc,
+  sourceFiles,
+  targetFile,
+} from "../src/locales.ts";
 import type { Translator } from "../src/models.ts";
 import { hasTranslatableText, mask, unmask } from "../src/placeholders.ts";
 import { splitSentences } from "../src/segment.ts";
@@ -174,6 +184,34 @@ test("detects dir and file layouts", () => {
   assert.throws(() => detectLayout(root, "xx"));
 });
 
+test("flattenStrings: key paths for nested objects and arrays", () => {
+  assert.deepEqual(flattenStrings({ a: "x", b: { c: "y" }, d: ["p", "q"] }), [
+    { path: "a", value: "x" },
+    { path: "b.c", value: "y" },
+    { path: "d[0]", value: "p" },
+    { path: "d[1]", value: "q" },
+  ]);
+  assert.deepEqual(flattenStrings("just a string"), [{ path: "(root)", value: "just a string" }]);
+});
+
+test("existingTargets: finds already-translated locales, dir and file layout", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-targets-"));
+  fs.mkdirSync(path.join(root, "locales/en"), { recursive: true });
+  fs.mkdirSync(path.join(root, "locales/fr"), { recursive: true });
+  fs.mkdirSync(path.join(root, "locales/empty")); // no locale files inside: not a target
+  fs.writeFileSync(path.join(root, "locales/en/common.json"), "{}");
+  fs.writeFileSync(path.join(root, "locales/fr/common.json"), "{}");
+  const l = detectLayout(root, "en");
+  assert.deepEqual(existingTargets(l, "en"), ["fr"]);
+
+  const fileRoot = fs.mkdtempSync(path.join(os.tmpdir(), "lai-targets-file-"));
+  fs.writeFileSync(path.join(fileRoot, "en.json"), "{}");
+  fs.writeFileSync(path.join(fileRoot, "fr.json"), "{}");
+  fs.writeFileSync(path.join(fileRoot, "de.json"), "{}");
+  const f = detectLayout(fileRoot, "en");
+  assert.deepEqual(existingTargets(f, "en"), ["de", "fr"]);
+});
+
 test("YAML locale files: dir layout (mixed with JSON), file layout, and round-trip style", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-yaml-"));
   fs.mkdirSync(path.join(root, "locales/en"), { recursive: true });
@@ -274,7 +312,7 @@ test("ARB: @key metadata and @@locale are not translatable and are reinserted; @
   assert.deepEqual(out["@greeting"], { description: "Greeting", placeholders: { name: {} } });
 });
 
-test("gettext .po: msgid is the stable key, plurals and the header pass through untranslated", () => {
+test("gettext .po: msgid is the stable key; plural entries are translated and expanded to the target's plural count", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-po-"));
   const file = path.join(root, "en.po");
   fs.writeFileSync(
@@ -295,13 +333,30 @@ test("gettext .po: msgid is the stable key, plurals and the header pass through 
     ].join("\n"),
   );
   const doc = readLocaleDoc(file, "en");
-  assert.equal(JSON.stringify(doc.data), '{"\\u0004greeting":"Hello!"}');
-  const built = { "\u0004greeting": "Bonjour!" };
+  assert.equal(
+    JSON.stringify(doc.data),
+    '{"\\u0004greeting":"Hello!","\\u0004items\\u0005one":"one item","\\u0004items\\u0005other":"many items"}',
+  );
+  const built = {
+    "\u0004greeting": "Bonjour!",
+    "\u0004items\u0005one": "un article",
+    "\u0004items\u0005other": "plusieurs articles",
+  };
   const text = doc.serialize(built, "fr");
   assert.match(text, /msgstr "Language: fr\\n"/);
   assert.match(text, /#: src\/app\.js:10\nmsgid "greeting"\nmsgstr "Bonjour!"/);
-  // The plural entry is carried through unchanged (not part of `data`, not translated).
-  assert.match(text, /msgid_plural "items_plural"\nmsgstr\[0\] "one item"\nmsgstr\[1\] "many items"/);
+  // French (nplurals=2): index 0 from the singular-sourced translation, index 1 from the plural-sourced one.
+  assert.match(text, /msgid_plural "items_plural"\nmsgstr\[0\] "un article"\nmsgstr\[1\] "plusieurs articles"/);
+
+  // Arabic (nplurals=6): all indices past 0 get the plural-sourced translation.
+  const arBuilt = { "\u0004items\u0005one": "عنصر واحد", "\u0004items\u0005other": "عناصر" };
+  const arText = doc.serialize(arBuilt, "ar");
+  assert.match(arText, /msgstr\[0\] "عنصر واحد"/);
+  for (let i = 1; i < 6; i++) assert.match(arText, new RegExp(`msgstr\\[${i}\\] "عناصر"`));
+
+  // A target with no translation yet falls back to the English msgid/msgid_plural, not empty strings.
+  const untouched = doc.serialize({}, "es");
+  assert.match(untouched, /msgstr\[0\] "items"\nmsgstr\[1\] "items_plural"/);
 });
 
 test("gettext .po: Plural-Forms is computed per target language, and a hand-fixed existing header survives a rerun", () => {

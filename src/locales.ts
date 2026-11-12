@@ -99,6 +99,24 @@ export function targetFile(layout: Layout, from: string, to: string, src: string
   return path.join(layout.root, to, path.relative(path.join(layout.root, from), src));
 }
 
+/** Locale tags already translated alongside `from` in this layout (for `locale-ai check`). */
+export function existingTargets(layout: Layout, from: string): string[] {
+  if (layout.kind === "file") {
+    const ext = layout.ext!;
+    return fs
+      .readdirSync(layout.root)
+      .filter((f) => f.endsWith(ext) && f.slice(0, -ext.length) !== from)
+      .map((f) => f.slice(0, -ext.length))
+      .sort();
+  }
+  return fs
+    .readdirSync(layout.root, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !e.name.startsWith(".") && e.name !== "node_modules" && e.name !== from)
+    .map((e) => e.name)
+    .filter((name) => listLocaleFiles(path.join(layout.root, name)).length > 0)
+    .sort();
+}
+
 /** A parsed locale file plus enough of its original style to re-render an edited copy the same way. */
 export interface LocaleDoc {
   data: unknown;
@@ -286,6 +304,11 @@ function pluralFormsHeader(lang: string): string {
   return `nplurals=${n}; plural=(${branches} ${n - 1});`;
 }
 
+/** The `nplurals=N` count from pluralFormsHeader, for expanding msgstr[] to the right length. */
+function pluralCount(lang: string): number {
+  return Number(/nplurals=(\d+)/.exec(pluralFormsHeader(lang))![1]);
+}
+
 function parsePo(text: string): { entries: PoEntry[]; leading: string[] } {
   const entries: PoEntry[] = [];
   let leading: string[] = [];
@@ -350,10 +373,25 @@ function parsePo(text: string): { entries: PoEntry[]; leading: string[] } {
   return { entries, leading };
 }
 
+/** Synthetic data keys for a plural entry's two translatable forms. */
+const pluralOneKey = (e: { msgctxt?: string; msgid: string }) => poKey(e) + "\u0005one";
+const pluralOtherKey = (e: { msgctxt?: string; msgid: string }) => poKey(e) + "\u0005other";
+
 function readPoDoc(file: string, text: string): LocaleDoc {
   const { entries, leading } = parsePo(text);
   const data = newObj();
-  for (const e of entries) if (!e.isHeader && e.msgidPlural === undefined) data[poKey(e)] = e.msgstr;
+  for (const e of entries) {
+    if (e.isHeader) continue;
+    if (e.msgidPlural === undefined) data[poKey(e)] = e.msgstr;
+    else {
+      // Like msgstr for a singular entry, msgstrPlural holds this FILE's own text: the
+      // English source form in the source .po, the translated forms in a target .po
+      // (msgid/msgid_plural are the stable keys, identical across every locale).
+      const forms = e.msgstrPlural ?? [];
+      data[pluralOneKey(e)] = forms[0] ?? "";
+      data[pluralOtherKey(e)] = forms[forms.length - 1] ?? forms[0] ?? "";
+    }
+  }
   const keepNewline = finalNewline(text);
   const serialize = (d: unknown, targetTag: string, existingText?: string): string => {
     const obj = isObj(d) ? d : newObj();
@@ -375,7 +413,18 @@ function readPoDoc(file: string, text: string): LocaleDoc {
         lines.push(`msgstr "${escapeC(header)}"`);
       } else if (e.msgidPlural !== undefined) {
         lines.push(`msgid "${escapeC(e.msgid)}"`, `msgid_plural "${escapeC(e.msgidPlural)}"`);
-        (e.msgstrPlural ?? []).forEach((s, i) => lines.push(`msgstr[${i}] "${escapeC(s)}"`));
+        const oneKey = pluralOneKey(e);
+        const otherKey = pluralOtherKey(e);
+        seen.add(oneKey);
+        seen.add(otherKey);
+        const one = typeof obj[oneKey] === "string" ? (obj[oneKey] as string) : e.msgid;
+        const other = typeof obj[otherKey] === "string" ? (obj[otherKey] as string) : e.msgidPlural;
+        const n = pluralCount(targetTag);
+        // Not full grammatical inflection (same simplification as addPluralForms for
+        // i18next): index 0 gets the singular-sourced form, every other index the
+        // plural-sourced one. A language with only one category (ja, zh, ...) gets
+        // just the plural form, since it has no separate singular count.
+        for (let i = 0; i < n; i++) lines.push(`msgstr[${i}] "${escapeC(n === 1 ? other : i === 0 ? one : other)}"`);
       } else {
         const key = poKey(e);
         seen.add(key);
@@ -418,6 +467,18 @@ const newObj = (): Obj => Object.create(null) as Obj;
 /** A string needs translating when the target has no non-empty string at the same path. */
 const needsTranslation = (existing: unknown, overwrite: boolean) =>
   overwrite || typeof existing !== "string" || existing === "";
+
+/** Flattens a locale tree into key-path -> string-value pairs (for `locale-ai check`). */
+export function flattenStrings(
+  data: unknown,
+  prefix = "",
+  out: Array<{ path: string; value: string }> = [],
+): Array<{ path: string; value: string }> {
+  if (typeof data === "string") out.push({ path: prefix || "(root)", value: data });
+  else if (Array.isArray(data)) data.forEach((v, i) => flattenStrings(v, `${prefix}[${i}]`, out));
+  else if (isObj(data)) for (const k of Object.keys(data)) flattenStrings(data[k], prefix ? `${prefix}.${k}` : k, out);
+  return out;
+}
 
 export function pendingStrings(source: unknown, existing: unknown, overwrite: boolean, out: string[] = []): string[] {
   if (typeof source === "string") {
