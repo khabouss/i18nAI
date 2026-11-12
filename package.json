@@ -17,7 +17,8 @@
   },
   "files": [
     "dist",
-    "scripts/convert-marian.py"
+    "scripts/convert-marian.py",
+    "scripts/trim-onnxruntime.cjs"
   ],
   "engines": {
     "node": ">=22.18"
@@ -28,7 +29,8 @@
     "dev": "node src/cli.ts",
     "test": "node --test test/*.test.ts",
     "test:e2e": "LOCALE_AI_E2E=1 node --test test/e2e.test.ts",
-    "prepublishOnly": "npm run build && npm test"
+    "prepublishOnly": "npm run build && npm test",
+    "postinstall": "node scripts/trim-onnxruntime.cjs"
   },
   "keywords": [
     "i18n",
@@ -48,5 +50,8 @@
   "devDependencies": {
     "@types/node": "^26.6.6",
     "typescript": "^7.0.2"
+  },
+  "allowScripts": {
+    "onnxruntime-node@1.30.0": true
   }
 }

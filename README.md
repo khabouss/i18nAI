@@ -135,6 +135,7 @@ Measured on a sample app (see `test/fixtures`):
 - **Sentence splitting**: OPUS-MT drops sentences from multi-sentence inputs, so each sentence is translated separately.
 - **Placeholder masking** with three marker styles tried in order (`{0}` / `<0>…</0>`, then numbers `900`, then `_P0_`), validating every marker; numbers survive models that mangle braces (en-zh, en-ru). A last-resort fallback translates around placeholders, and anything that needed it is listed for review.
 - **Speed** (20-core CPU, ~1 GB RAM): sample app (43 strings) in ~3 s per language with beam search, ~2 s with `--fast`; full sentences at ~18/s (built-in, beam 4), ~12/s (tc-big, beam 4), ~33/s (tc-big, `--fast`).
+- **Install size**: `onnxruntime-node` bundles binaries for every platform, and on linux/x64 downloads a ~260 MB CUDA provider by default — locale-ai only ever runs on CPU (`executionProviders: ["cpu"]`), so a `postinstall` script ([`scripts/trim-onnxruntime.cjs`](scripts/trim-onnxruntime.cjs)) removes the unused platforms and GPU providers after install, cutting it from ~550 MB to ~45 MB on your current platform.
 
 ## Development
 
@@ -149,7 +150,5 @@ npm run build       # → dist/
 
 ## Next steps
 
-1. **Host the tc-big models** (converted ONNX) on Hugging Face so they can become the built-in defaults instead of a manual conversion. `en-fr` is done ([khabouss/opus-mt-tc-big-en-fr-onnx](https://huggingface.co/khabouss/opus-mt-tc-big-en-fr-onnx)); es, it, pt, ar, ru/uk, tr remain.
-2. **Smaller install.** `onnxruntime-node` is ~550 MB unpacked: it ships binaries for every platform plus a 260 MB CUDA provider we never use.
-3. **More languages**: ja, ko, pl have no usable OPUS-MT model yet; a different model family would be needed.
-4. **More formats**: YAML, `.po`, ARB, Apple `.strings`.
+1. **More languages**: ja, ko, pl have no usable OPUS-MT model yet; a different model family would be needed.
+2. **More formats**: YAML, `.po`, ARB, Apple `.strings`.
