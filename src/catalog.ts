@@ -43,8 +43,8 @@ const pair = (src: string, tgt: string): ModelEntry => ({
 
 const DIRECT = [
   "af-en", "ar-en", "cs-en", "da-de", "da-en", "de-en", "de-es", "de-fr",
-  "en-af", "en-cs", "en-da", "en-de", "en-es", "en-fi", "en-fr", "en-hi",
-  "en-hu", "en-id", "en-it", "en-nl", "en-ro", "en-ru", "en-sv", "en-uk",
+  "en-af", "en-cs", "en-da", "en-de", "en-es", "en-fi", "en-hi",
+  "en-hu", "en-id", "en-it", "en-nl", "en-ro", "en-sv",
   "en-xh", "es-de", "es-en", "es-fr", "es-it", "es-ru", "et-en", "fi-de",
   "fi-en", "fr-de", "fr-en", "fr-es", "fr-ro", "fr-ru", "hi-en", "hu-en",
   "id-en", "it-en", "it-es", "it-fr", "ja-en", "ko-en", "nl-en", "nl-fr",
@@ -59,10 +59,36 @@ export const CATALOG: ModelEntry[] = [
     const [s, t] = p.split("-");
     return pair(s, t);
   }),
+  // tc-big: larger OPUS-MT checkpoints, clearly better than the defaults (see
+  // bench/README.md). Converted and hosted per the README's "Add a language,
+  // or a better model" section.
+  { ...pair("en", "fr"), repo: "khabouss/opus-mt-tc-big-en-fr-onnx" }, // chrF 72.5 vs 68.9, BLEU 55.9 vs 53.7
+  { ...pair("en", "es"), repo: "khabouss/opus-mt-tc-big-en-es-onnx" }, // chrF 73.6 vs 72.9, BLEU 57.4 vs 56.9
+  { ...pair("en", "it"), repo: "khabouss/opus-mt-tc-big-en-it-onnx" }, // chrF 75.3 vs 73.8, BLEU 58.2 vs 54.9
+  // New: Turkish, not supported by any built-in model before this.
+  { ...pair("en", "tr"), repo: "khabouss/opus-mt-tc-big-en-tr-onnx" }, // chrF 67.4, BLEU 42.1
   {
-    // Note: the model card lists Moroccan Arabic ("ary") but its vocabulary has no
-    // >>ary<< token, so Darija is not supported.
+    // Multi-target: >>por<< (European) / >>pob<< (Brazilian). No individual built-in
+    // existed before; pt was only reachable via the weaker en-ROMANCE model.
+    id: "en-pt",
+    repo: "khabouss/opus-mt-tc-big-en-pt-onnx", // chrF 70.6 vs 68.3, BLEU 47.7 vs 44.4
+    sources: ["en"],
+    targets: ["pt"],
+    prefix: (t) => (t.region === "BR" ? ">>pob<<" : ">>por<<"),
+  },
+  {
+    // Multi-target East Slavic model, replaces the separate en-ru/en-uk built-ins.
+    id: "en-zle",
+    repo: "khabouss/opus-mt-tc-big-en-zle-onnx", // ru: chrF 68.2 vs 65.7, BLEU 48.1 vs 46.0
+    sources: ["en"],
+    targets: ["ru", "uk"],
+    prefix: (t) => (t.lang === "ru" ? ">>rus<<" : ">>ukr<<"),
+  },
+  {
+    // Note: the model card lists Moroccan Arabic ("ary") but its output stays close
+    // to Modern Standard Arabic, so Darija is not treated as supported.
     ...pair("en", "ar"),
+    repo: "khabouss/opus-mt-tc-big-en-ar-onnx", // chrF 49.7 vs 47.8, BLEU 19.9 vs 16.6 (greedy)
     prefix: () => ">>ara<<",
   },
   {

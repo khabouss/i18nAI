@@ -92,8 +92,8 @@ test("routes: direct, multi-target prefix, pivot, unsupported", () => {
   const en = parseLocale("en");
   assert.deepEqual(resolveRoute(en, parseLocale("fr"))!.map((h) => h.model.id), ["en-fr"]);
   const pt = resolveRoute(en, parseLocale("pt-BR"))!;
-  assert.equal(pt[0].model.id, "en-ROMANCE");
-  assert.equal(pt[0].prefix, ">>pt_BR<<");
+  assert.equal(pt[0].model.id, "en-pt");
+  assert.equal(pt[0].prefix, ">>pob<<");
   assert.equal(resolveRoute(en, parseLocale("zh-TW"))![0].prefix, ">>cmn_Hant<<");
   assert.equal(resolveRoute(en, parseLocale("ar"))![0].prefix, ">>ara<<");
   assert.deepEqual(resolveRoute(parseLocale("ja"), parseLocale("fr"))!.map((h) => h.model.id), ["ja-en", "en-fr"]);

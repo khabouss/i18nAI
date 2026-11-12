@@ -16,9 +16,9 @@ npx locale-ai translate --from en --to fr,es,de
 locale-ai 0.2.0
 Found 3 en files in locales/en/
 Models to download (one time, then cached for every project):
-  en-fr         114 MB  Xenova/opus-mt-en-fr
+  en-fr         345 MB  khabouss/opus-mt-tc-big-en-fr-onnx
   ...
-Download 346 MB? (Y/n)
+Download 577 MB? (Y/n)
 ✓ fr         43 strings translated, 3 files written in 2.7s, 1 plural forms added
 ✓ es         43 strings translated, 3 files written in 2.5s, 1 plural forms added
 ✓ de         43 strings translated, 3 files written in 2.1s
@@ -98,11 +98,10 @@ then declare it in `locale-ai.config.json`:
 - `prefix` is required for multi-target models (`convert` lists the model's `>>xx<<` tokens).
 - Project models take priority over built-ins for their language pairs and can be used for pivoting (e.g. `ja → en → tr`).
 
-**Recommended for quality**: the `opus-mt-tc-big-en-*` models (fr, es, it, pt, ar, tr, and `zle` for ru/uk). They are ~3x larger (270–370 MB int8) and ~1.5x slower, and clearly better:
+**Recommended for quality**: the `opus-mt-tc-big-en-*` models (es, it, pt, ar, tr, and `zle` for ru/uk). They are ~3x larger (270–370 MB int8) and ~1.5x slower, and clearly better. `en-fr` already uses one of these as its built-in model (see [Languages](#languages)), hosted at [khabouss/opus-mt-tc-big-en-fr-onnx](https://huggingface.co/khabouss/opus-mt-tc-big-en-fr-onnx) — no conversion needed for it.
 
 | Target | Built-in model, chrF / BLEU | tc-big model, chrF / BLEU |
 |---|---|---|
-| fr | 68.9 / 53.7 | **72.5 / 55.9** |
 | es | 72.9 / 56.9 | **73.6 / 57.4** |
 | it | 73.8 / 54.9 | **75.3 / 58.2** |
 | pt | 68.3 / 44.4 | **70.6 / 47.7** (`>>por<<`, or `>>pob<<` for pt-BR) |
@@ -124,7 +123,7 @@ Measured on a sample app (see `test/fixtures`):
 | Usable — review before shipping | it, ar, ru, zh-CN, zh-TW |
 | Untested | the other pairs in `locale-ai models list` |
 
-With the tc-big models above, it, ar and ru move up a tier and tr becomes available. Not available yet: ja, ko, pl and others; he works with a converted `opus-mt-en-he` (weaker). Moroccan Arabic (Darija): the tc-big en-ar model has a `>>ary<<` token, but its output is close to Modern Standard Arabic — not supported.
+`en-fr` is already on the tc-big model (chrF 72.5 / BLEU 55.9) as a built-in, no config needed. With the other tc-big models above, it, ar and ru move up a tier and tr becomes available. Not available yet: ja, ko, pl and others; he works with a converted `opus-mt-en-he` (weaker). Moroccan Arabic (Darija): the tc-big en-ar model has a `>>ary<<` token, but its output is close to Modern Standard Arabic — not supported.
 
 ## How it works
 
@@ -142,7 +141,7 @@ With the tc-big models above, it, ar and ru move up a tier and tr becomes availa
 ```bash
 npm install
 npm test            # unit tests (no models)
-npm run test:e2e    # real models, downloads ~115 MB once
+npm run test:e2e    # real models, downloads ~345 MB once (en-fr, tc-big)
 node bench/eval.ts --dir <model dir> --lang fr --beams 4 --out out.json   # quality benchmark (see bench/README.md)
 npm run dev -- translate --to fr   # run from source (Node ≥ 22.18 strips types)
 npm run build       # → dist/
@@ -150,7 +149,7 @@ npm run build       # → dist/
 
 ## Next steps
 
-1. **Host the tc-big models** (converted ONNX) on Hugging Face so they can become the built-in defaults instead of a manual conversion.
+1. **Host the tc-big models** (converted ONNX) on Hugging Face so they can become the built-in defaults instead of a manual conversion. `en-fr` is done ([khabouss/opus-mt-tc-big-en-fr-onnx](https://huggingface.co/khabouss/opus-mt-tc-big-en-fr-onnx)); es, it, pt, ar, ru/uk, tr remain.
 2. **Smaller install.** `onnxruntime-node` is ~550 MB unpacked: it ships binaries for every platform plus a 260 MB CUDA provider we never use.
 3. **More languages**: ja, ko, pl have no usable OPUS-MT model yet; a different model family would be needed.
 4. **More formats**: YAML, `.po`, ARB, Apple `.strings`.
