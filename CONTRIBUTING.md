@@ -52,4 +52,4 @@ Open an [issue](https://github.com/khabouss/locale-ai/issues) with:
 
 ## Questions
 
-Open a [discussion](https://github.com/khabouss/locale-ai/discussions) or an issue — there's no dumb question.
+Open an [issue](https://github.com/khabouss/locale-ai/issues) — there's no dumb question.
