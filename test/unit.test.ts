@@ -470,6 +470,58 @@ test("gettext .po: msgid is the stable key; plural entries are translated and ex
   assert.match(untouched, /msgstr\[0\] "items"\nmsgstr\[1\] "items_plural"/);
 });
 
+test("gettext .po: a template source (empty msgstr) falls back to msgid, never for a target file", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-po-template-"));
+  const file = path.join(root, "en.pot");
+  fs.writeFileSync(
+    file,
+    ['msgid ""', 'msgstr ""', "", 'msgid "greeting"', 'msgstr ""', "", 'msgid "items"', 'msgid_plural "items_plural"', 'msgstr[0] ""', 'msgstr[1] ""', ""].join("\n"),
+  );
+  const asSource = readLocaleDoc(file, "en", true);
+  assert.equal(
+    JSON.stringify(asSource.data),
+    '{"\\u0004greeting":"greeting","\\u0004items\\u0005one":"items","\\u0004items\\u0005other":"items_plural"}',
+  );
+  // The same empty msgstr read as an existing TARGET means "not translated yet", not "translate the key".
+  const asTarget = readLocaleDoc(file, "fr", false);
+  assert.equal(JSON.stringify(asTarget.data), '{"\\u0004greeting":"","\\u0004items\\u0005one":"","\\u0004items\\u0005other":""}');
+});
+
+test("gettext .po: a .pot source writes a .po target, never a .pot", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-pot-target-"));
+  fs.mkdirSync(path.join(root, "en"), { recursive: true });
+  fs.writeFileSync(path.join(root, "en/app.pot"), "");
+  const dirLayout = detectLayout(root, "en");
+  assert.equal(targetFile(dirLayout, "en", "fr", path.join(root, "en/app.pot")), path.join(root, "fr/app.po"));
+
+  const fileRoot = fs.mkdtempSync(path.join(os.tmpdir(), "lai-pot-target-file-"));
+  fs.writeFileSync(path.join(fileRoot, "en.pot"), "");
+  const fileLayout = detectLayout(fileRoot, "en");
+  assert.equal(targetFile(fileLayout, "en", "fr", path.join(fileRoot, "en.pot")), path.join(fileRoot, "fr.po"));
+});
+
+test("gettext .po: a translator's comments and #, fuzzy flag on the target survive a rerun; --fuzzy flags what changed", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-po-fuzzy-"));
+  const file = path.join(root, "en.po");
+  fs.writeFileSync(file, ['msgid ""', 'msgstr ""', "", "#: src/app.js:10", 'msgid "greeting"', 'msgstr "Hello!"', ""].join("\n"));
+  const doc = readLocaleDoc(file, "en", true);
+
+  // A translator hand-added a note and a fuzzy flag directly on the target file.
+  const existing = ['msgid ""', 'msgstr "Language: fr\\n"', "", "#. needs a friendlier tone", "#, fuzzy", 'msgid "greeting"', 'msgstr "Salut!"', ""].join("\n");
+  const rerun = doc.serialize({ "\u0004greeting": "Salut!" }, "fr", existing);
+  assert.match(rerun, /#\. needs a friendlier tone\n#, fuzzy\nmsgid "greeting"/);
+
+  // --fuzzy flags an entry this run actually changed, merging onto the translator's comment rather than duplicating the flag.
+  const docFuzzy = readLocaleDoc(file, "en", true, true);
+  const existingPlain = ['msgid ""', 'msgstr "Language: fr\\n"', "", "#. needs a friendlier tone", 'msgid "greeting"', 'msgstr "Salut!"', ""].join("\n");
+  const changed = docFuzzy.serialize({ "\u0004greeting": "Bonjour!" }, "fr", existingPlain);
+  // "#, fuzzy" is its own flag line, never appended to an unrelated "#." translator-note line.
+  assert.match(changed, /#\. needs a friendlier tone\n#, fuzzy\nmsgid "greeting"\nmsgstr "Bonjour!"/);
+  // Unchanged from the existing target: not flagged.
+  const unchanged = docFuzzy.serialize({ "\u0004greeting": "Salut!" }, "fr", existingPlain);
+  assert.doesNotMatch(unchanged, /fuzzy/);
+});
+
 test("gettext .po: Plural-Forms is computed per target language, and a hand-fixed existing header survives a rerun", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-po-header-"));
   const file = path.join(root, "en.po");

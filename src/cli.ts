@@ -70,11 +70,12 @@ Usage:
 Translate options:
   --from <locale>       Source locale (default: en)
   --to <locales>        Target locale(s), comma separated: fr,es,pt-BR
-  --input <dir>         Folder containing <from>/ or <from>.json/.yaml/.yml/.po/.arb/.strings (auto-detected)
+  --input <dir>         Folder containing <from>/ or <from>.json/.yaml/.yml/.po/.pot/.arb/.strings (auto-detected)
   --overwrite           Re-translate strings that already have a translation
   --dry-run             Show what would be translated without downloading or writing
   --fast                Greedy decoding: ~2x faster, slightly lower quality
   --report <file>       Write a JSON report of strings that need review
+  --fuzzy               For .po/.pot: flag every entry this run (re)translated as "#, fuzzy"
   --config <file>       Project config (default: ./${CONFIG_FILE} if present)
   -y, --yes             Download required models without asking
 
@@ -199,6 +200,7 @@ async function cmdTranslate(argv: string[]): Promise<number> {
       beams: { type: "string" },
       report: { type: "string" },
       config: { type: "string" },
+      fuzzy: { type: "boolean", default: false },
       yes: { type: "boolean", short: "y", default: false },
     },
   });
@@ -215,7 +217,7 @@ async function cmdTranslate(argv: string[]): Promise<number> {
   const layout = detectLayout(process.cwd(), from.tag, values.input);
   const lockPath = path.resolve(process.cwd(), LOCK_FILENAME);
   const lock = loadLock(lockPath);
-  const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag) }));
+  const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag, true, values.fuzzy!) }));
   const singularHints = new Set(sources.flatMap(({ doc }) => [...pluralOneStrings(doc.data)]));
   log(`locale-ai ${VERSION}`);
   log(
@@ -479,7 +481,7 @@ async function cmdCheck(argv: string[]): Promise<number> {
   });
   const from = parseLocale(values.from!);
   const layout = detectLayout(process.cwd(), from.tag, values.input);
-  const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag) }));
+  const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag, true) }));
   const targets = existingTargets(layout, from.tag);
   if (!targets.length) {
     log(`No translated locales found next to ${from.tag}.`);

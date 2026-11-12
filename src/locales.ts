@@ -18,7 +18,7 @@ export interface Layout {
   ext?: string;
 }
 
-const EXTENSIONS = [".json", ".yaml", ".yml", ".po", ".arb", ".strings"];
+const EXTENSIONS = [".json", ".yaml", ".yml", ".po", ".pot", ".arb", ".strings"];
 
 const CANDIDATES = [
   "locales",
@@ -95,9 +95,14 @@ export function sourceFiles(layout: Layout, from: string): string[] {
   return layout.kind === "dir" ? listLocaleFiles(path.join(layout.root, from)) : [path.join(layout.root, `${from}${layout.ext}`)];
 }
 
+/** A translated file is a real PO, never a template, regardless of what the source was. */
+const outputExt = (ext: string) => (ext === ".pot" ? ".po" : ext);
+
 export function targetFile(layout: Layout, from: string, to: string, src: string): string {
-  if (layout.kind === "file") return path.join(layout.root, `${to}${layout.ext}`);
-  return path.join(layout.root, to, path.relative(path.join(layout.root, from), src));
+  if (layout.kind === "file") return path.join(layout.root, `${to}${outputExt(layout.ext!)}`);
+  const rel = path.relative(path.join(layout.root, from), src);
+  const ext = path.extname(rel);
+  return path.join(layout.root, to, ext === ".pot" ? `${rel.slice(0, -ext.length)}.po` : rel);
 }
 
 /** True when `tag` parses as a locale (e.g. "fr", "pt-BR") — rejects names like "__mocks__" or "schemas". */
@@ -396,19 +401,34 @@ function parsePo(text: string): { entries: PoEntry[]; leading: string[] } {
 const pluralOneKey = (e: { msgctxt?: string; msgid: string }) => poKey(e) + "\u0005one";
 const pluralOtherKey = (e: { msgctxt?: string; msgid: string }) => poKey(e) + "\u0005other";
 
-function readPoDoc(file: string, text: string): LocaleDoc {
+/** Adds a `#, fuzzy` gettext flag to a comment block, merging onto an existing `#,` line rather than duplicating it. */
+function withFuzzyFlag(comments: string[]): string[] {
+  const i = comments.findIndex((c) => /^#,/.test(c));
+  if (i === -1) return [...comments, "#, fuzzy"];
+  if (/\bfuzzy\b/.test(comments[i])) return comments;
+  return comments.map((c, j) => (j === i ? `${c}, fuzzy` : c));
+}
+
+function readPoDoc(file: string, text: string, isSource: boolean, fuzzy: boolean): LocaleDoc {
   const { entries, leading } = parsePo(text);
   const data = newObj();
   for (const e of entries) {
     if (e.isHeader) continue;
-    if (e.msgidPlural === undefined) data[poKey(e)] = e.msgstr;
-    else {
+    if (e.msgidPlural === undefined) {
+      // A template (.pot) or a project that keeps the English text in msgid and
+      // leaves the source .po's own msgstr empty: fall back to msgid so the source
+      // text isn't just "", which would otherwise translate every entry to nothing
+      // with no warning. Never done for a target file, where an empty msgstr
+      // legitimately means "not translated yet".
+      data[poKey(e)] = isSource && e.msgstr === "" ? e.msgid : e.msgstr;
+    } else {
       // Like msgstr for a singular entry, msgstrPlural holds this FILE's own text: the
       // English source form in the source .po, the translated forms in a target .po
       // (msgid/msgid_plural are the stable keys, identical across every locale).
       const forms = e.msgstrPlural ?? [];
-      data[pluralOneKey(e)] = forms[0] ?? "";
-      data[pluralOtherKey(e)] = forms[forms.length - 1] ?? forms[0] ?? "";
+      const useMsgid = isSource && forms.every((f) => f === "");
+      data[pluralOneKey(e)] = useMsgid ? e.msgid : forms[0] ?? "";
+      data[pluralOtherKey(e)] = useMsgid ? e.msgidPlural! : forms[forms.length - 1] ?? forms[0] ?? "";
     }
   }
   const keepNewline = finalNewline(text);
@@ -416,22 +436,34 @@ function readPoDoc(file: string, text: string): LocaleDoc {
     const obj = isObj(d) ? d : newObj();
     const seen = new Set<string>();
     const blocks: string[] = leading.length ? [leading.join("\n")] : [];
+    const existingEntries = existingText ? parsePo(existingText).entries : [];
     // A previous run may have left a header a translator then hand-fixed (a corrected
     // Plural-Forms, an added Last-Translator, ...). Keep it as-is rather than
     // regenerating from the source every time; only a brand-new target file gets a
     // freshly computed header.
-    const existingHeader = existingText && parsePo(existingText).entries.find((e) => e.isHeader);
+    const existingHeader = existingEntries.find((e) => e.isHeader);
+    // Comments (translator notes, `#, fuzzy` flags, ...) a translator may have added
+    // directly to the target file, keyed the same way entries are. Previously
+    // serialize always used the SOURCE's own comments for every entry, silently
+    // wiping anything a translator had added to the target on the very next run.
+    const existingByKey = new Map(existingEntries.filter((e) => !e.isHeader).map((e) => [poKey(e), e]));
     for (const e of entries) {
-      const lines = [...e.comments];
-      if (e.msgctxt !== undefined) lines.push(`msgctxt "${escapeC(e.msgctxt)}"`);
       if (e.isHeader) {
-        lines.push(`msgid ""`);
+        const lines = [...e.comments, `msgid ""`];
         const header = existingHeader
           ? existingHeader.msgstr
           : e.msgstr.replace(/^Language:.*$/m, `Language: ${targetTag}`).replace(/^Plural-Forms:.*$/m, `Plural-Forms: ${pluralFormsHeader(targetTag)}`);
         lines.push(`msgstr "${escapeC(header)}"`);
-      } else if (e.msgidPlural !== undefined) {
-        lines.push(`msgid "${escapeC(e.msgid)}"`, `msgid_plural "${escapeC(e.msgidPlural)}"`);
+        blocks.push(lines.join("\n"));
+        continue;
+      }
+      const existingEntry = existingByKey.get(poKey(e));
+      let comments = existingEntry?.comments ?? e.comments;
+      const content: string[] = [];
+      if (e.msgctxt !== undefined) content.push(`msgctxt "${escapeC(e.msgctxt)}"`);
+      let changed: boolean;
+      if (e.msgidPlural !== undefined) {
+        content.push(`msgid "${escapeC(e.msgid)}"`, `msgid_plural "${escapeC(e.msgidPlural)}"`);
         const oneKey = pluralOneKey(e);
         const otherKey = pluralOtherKey(e);
         seen.add(oneKey);
@@ -443,14 +475,18 @@ function readPoDoc(file: string, text: string): LocaleDoc {
         // i18next): index 0 gets the singular-sourced form, every other index the
         // plural-sourced one. A language with only one category (ja, zh, ...) gets
         // just the plural form, since it has no separate singular count.
-        for (let i = 0; i < n; i++) lines.push(`msgstr[${i}] "${escapeC(n === 1 ? other : i === 0 ? one : other)}"`);
+        for (let i = 0; i < n; i++) content.push(`msgstr[${i}] "${escapeC(n === 1 ? other : i === 0 ? one : other)}"`);
+        const forms = existingEntry?.msgstrPlural;
+        changed = !forms || forms[0] !== one || forms[forms.length - 1] !== other;
       } else {
         const key = poKey(e);
         seen.add(key);
         const v = typeof obj[key] === "string" ? (obj[key] as string) : "";
-        lines.push(`msgid "${escapeC(e.msgid)}"`, `msgstr "${escapeC(v)}"`);
+        content.push(`msgid "${escapeC(e.msgid)}"`, `msgstr "${escapeC(v)}"`);
+        changed = existingEntry?.msgstr !== v;
       }
-      blocks.push(lines.join("\n"));
+      if (fuzzy && changed) comments = withFuzzyFlag(comments);
+      blocks.push([...comments, ...content].join("\n"));
     }
     for (const k of Object.keys(obj)) {
       if (seen.has(k) || typeof obj[k] !== "string") continue;
@@ -485,12 +521,19 @@ function readText(file: string): string {
   return buf.toString("utf8").replace(/^﻿/, "");
 }
 
-/** `tag` is the locale this file is for (the source tag, or an existing target's own tag). */
-export function readLocaleDoc(file: string, tag: string): LocaleDoc {
+/**
+ * `tag` is the locale this file is for (the source tag, or an existing target's own
+ * tag). `isSource` marks this as the FROM-locale file being read as the thing to
+ * translate (as opposed to an already-existing target) — only then does a `.po`
+ * entry's empty `msgstr` fall back to `msgid` as the source text (see readPoDoc).
+ * `fuzzy`, for `.po`/`.pot` only, marks every entry this run actually (re)translated
+ * with gettext's standard `#, fuzzy` "needs review" flag.
+ */
+export function readLocaleDoc(file: string, tag: string, isSource = false, fuzzy = false): LocaleDoc {
   const text = readText(file);
   const ext = path.extname(file).toLowerCase();
   if (ext === ".yaml" || ext === ".yml") return readYamlDoc(file, text, tag);
-  if (ext === ".po") return readPoDoc(file, text);
+  if (ext === ".po" || ext === ".pot") return readPoDoc(file, text, isSource, fuzzy);
   if (ext === ".arb") return readArbDoc(file, text);
   if (ext === ".strings") return readStringsDoc(file, text);
   return readJsonDoc(file, text);
