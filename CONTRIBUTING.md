@@ -30,6 +30,19 @@ npm run typecheck
 
 See the [Add a language, or a better model](README.md#add-a-language-or-a-better-model) section of the README. If you convert and validate a new model, a PR adding it to the benchmark table and `Languages` section is very welcome.
 
+## Cutting a release
+
+Releases are tag-triggered, not merge-triggered — merging to `main` never publishes anything by itself.
+
+```bash
+npm version patch   # or minor / major — bumps package.json, commits, tags locally
+git push && git push --tags
+```
+
+Pushing a tag matching `v*.*.*` triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds, tests, runs `npm publish`, and creates a GitHub Release with auto-generated notes from the commits since the last tag.
+
+This uses npm's [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) (OIDC) — no `NPM_TOKEN` secret to store or rotate. It's configured once on the npm package's settings page (Publishing access → Trusted Publisher → GitHub Actions), pointing at `khabouss/locale-ai` and `.github/workflows/release.yml`; from then on, npm trusts that exact workflow run and nothing else.
+
 ## Reporting bugs
 
 Open an [issue](https://github.com/khabouss/locale-ai/issues) with:
