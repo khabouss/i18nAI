@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.venv-convert/
+bench/models/
+bench/out/
+models/
+*.onnx
+*.onnx_data
+*.tmp.ts

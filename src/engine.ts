@@ -1,0 +1,302 @@
+import { extractIcu } from "./icu.ts";
+import type { Translator } from "./models.ts";
+import {
+  fixTagSpacing,
+  hasTranslatableText,
+  mapOutsideTokens,
+  mask,
+  numericStyleSafe,
+  splitOnTokens,
+  stripMarkers,
+  unmask,
+  type Style,
+} from "./placeholders.ts";
+import { splitSentences } from "./segment.ts";
+
+export interface EngineOptions {
+  /** Intl locale codes. */
+  sourceLang: string;
+  targetLang: string;
+  batchSize: number;
+  /** Project terms that must be copied verbatim. */
+  protect?: RegExp;
+  /** Whole-string glossary; a hit skips the model. */
+  lookup?: (s: string) => string | undefined;
+  onProgress?: (done: number, total: number) => void;
+}
+
+export type IssueKind = "placeholder-fallback" | "suspicious-length" | "repetition";
+
+export interface Issue {
+  source: string;
+  kind: IssueKind;
+  output?: string;
+}
+
+export interface EngineResult {
+  translations: Map<string, string>;
+  issues: Issue[];
+}
+
+/** One translatable unit: a whole string, or one text run of an ICU message. */
+interface Unit {
+  text: string;
+  /** The full source string the unit belongs to (for reporting). */
+  owner: string;
+  result?: string;
+}
+
+interface Progress {
+  done: number;
+  total: number;
+}
+
+const letters = (s: string) => stripMarkers(s).replace(/[^\p{L}]/gu, "");
+
+function isAllCaps(s: string): boolean {
+  const l = letters(s);
+  return l.length >= 2 && l === l.toUpperCase() && l !== l.toLowerCase();
+}
+
+/** ALL-CAPS labels translate badly, so they are sent in sentence case and re-uppercased. */
+function prepare(src: string): string {
+  if (!isAllCaps(src)) return src;
+  let first = true;
+  return mapOutsideTokens(src, (x) =>
+    x.toLowerCase().replace(/\p{L}/u, (c) => {
+      if (!first) return c;
+      first = false;
+      return c.toUpperCase();
+    }),
+  );
+}
+
+/** Scripts written without spaces between words. */
+const NO_SPACES = /^(zh|ja|th|lo|km|my)\b/;
+
+const FULLWIDTH: Record<string, string> = { ",": "，", "?": "？", "!": "！", ":": "：", ";": "；", "(": "（", ")": "）" };
+
+/** Chinese typography: full-width punctuation, no stray spaces next to Han characters. */
+function fixCjk(r: string): string {
+  return r
+    .replace(/(?<=\p{Script=Han})\s*([,?!:;])\s*/gu, (_m, c: string) => FULLWIDTH[c])
+    .replace(/\s+(?=[。，？！：；])/gu, "")
+    .replace(/(?<=\p{Script=Han})\s+(?=\p{Script=Han})/gu, "")
+    .replace(/(?<=\p{Script=Han})\.$/u, "。");
+}
+
+/** Languages that write counts before the noun ("3 files", "3 fichiers"). */
+const COUNT_FIRST = /^(fr|es|pt|it|ca|gl|ro|nl|de|da|sv|no|en)\b/;
+
+/** Keeps "{0} noun" order for languages that put counts first. */
+function fixMarkers(src: string, out: string, targetLang: string): string {
+  let r = out;
+  // "{0} file" -> "Fichier {0}": move a leading count back in front of a short noun phrase.
+  const lead = /^\{(\d+)\}\s+\p{L}/u.exec(src);
+  if (lead && COUNT_FIRST.test(targetLang)) {
+    const tail = new RegExp(`^([^{}<>]+?)\\s+\\{${lead[1]}\\}([.!?]?)$`, "u").exec(r);
+    if (tail && tail[1].split(/\s+/).length <= 3) {
+      const words = /^de\b/.test(targetLang) ? tail[1] : tail[1].replace(/^\p{Lu}(?!\p{Lu})/u, (c) => c.toLocaleLowerCase(targetLang));
+      r = `{${lead[1]}} ${words}${tail[2]}`;
+    }
+  }
+  return r;
+}
+
+function postprocess(src: string, out: string, targetLang: string): string {
+  let r = fixMarkers(src, out.trim(), targetLang);
+  // Punctuation the model doubled ("Konto??", "cuenta?.....") unless the source has it.
+  r = r.replace(/([?!])[.?!]+/g, (m, c: string) => (src.includes(m) ? m : c));
+  r = r.replace(/([,;:])\1+|(?<!\.)\.{2}(?!\.)/g, (m) => (src.includes(m) ? m : m[0]));
+  // Labels like "Settings" must not gain a trailing period.
+  if (!/[.。!?！？…]$/.test(src) && /[^.]\.$/.test(r)) r = r.slice(0, -1);
+  if (src.endsWith("…") && r.endsWith("...")) r = r.slice(0, -3) + "…";
+  if (/^zh\b/.test(targetLang)) r = fixCjk(r);
+  if (/^fr\b/.test(targetLang)) {
+    // French typography: a space before ! ? ; : (the model is inconsistent about it).
+    r = r.replace(/(?<=[^\s!?;:])([!?;:])(?=\s|$)/g, " $1");
+  }
+  if (isAllCaps(src)) return mapOutsideTokens(r, (x) => x.toLocaleUpperCase(targetLang));
+  // Keep the source's leading capital ("Save" -> "Enregistrer", not "enregistrer").
+  const s0 = letters(src)[0];
+  if (s0 && s0 !== s0.toLowerCase()) {
+    let done = false;
+    r = mapOutsideTokens(r, (x) =>
+      done
+        ? x
+        : x.replace(/\p{L}/u, (c) => {
+            done = true;
+            return c.toLocaleUpperCase(targetLang);
+          }),
+    );
+  }
+  return r;
+}
+
+/** Output the model produces when it gets confused by markers: "{0}_________". */
+function isDegenerate(src: string, out: string): boolean {
+  if (!stripMarkers(out).trim()) return true;
+  for (const re of [/_{3,}/, /(\S)\1{5,}/u, /([^\p{L}\p{N}\s.])\1{3,}/u, /\.{4,}/, /(?:[<>] ?){4,}/, />>\w+<</]) {
+    if (re.test(out) && !re.test(src)) return true;
+  }
+  return false;
+}
+
+/** Runs unique inputs through every hop (pivot translation) in length-sorted batches. */
+async function runModels(
+  inputs: Set<string>,
+  hops: Translator[],
+  opts: EngineOptions,
+  progress: Progress,
+): Promise<Map<string, string>> {
+  progress.total += inputs.size * hops.length;
+  let current = new Map<string, string>([...inputs].map((s) => [s, s]));
+  for (const hop of hops) {
+    const unique = [...new Set(current.values())].sort((a, b) => a.length - b.length);
+    const out = new Map<string, string>();
+    for (let i = 0; i < unique.length; i += opts.batchSize) {
+      const batch = unique.slice(i, i + opts.batchSize);
+      const res = await hop.translate(batch);
+      batch.forEach((s, j) => out.set(s, res[j] ?? ""));
+      progress.done += batch.length;
+      opts.onProgress?.(progress.done, progress.total);
+    }
+    // Pivot inputs that collapsed to the same intermediate text count once.
+    progress.done += inputs.size - unique.length;
+    current = new Map([...current].map(([k, v]) => [k, out.get(v) ?? ""]));
+  }
+  return current;
+}
+
+/**
+ * Translates units with one marker style. Units whose placeholders do not survive
+ * (or whose output is degenerate) are returned for the next strategy.
+ */
+async function attempt(
+  units: Unit[],
+  style: Style,
+  hops: Translator[],
+  opts: EngineOptions,
+  progress: Progress,
+  issues: Issue[],
+): Promise<Unit[]> {
+  const failed: Unit[] = [];
+  if (style === "numeric") {
+    failed.push(...units.filter((u) => !numericStyleSafe(u.text)));
+    units = units.filter((u) => numericStyleSafe(u.text));
+  }
+  const jobs = units.map((unit) => {
+    const masked = mask(unit.text, style, opts.protect);
+    const pieces = hasTranslatableText(masked.text)
+      ? splitSentences(masked.text, opts.sourceLang).map((p) =>
+          p.translate && !hasTranslatableText(p.value) ? { translate: false, value: p.value } : p,
+        )
+      : [];
+    return { unit, masked, pieces };
+  });
+
+  const inputs = new Set<string>();
+  for (const j of jobs) for (const p of j.pieces) if (p.translate) inputs.add(prepare(p.value));
+  const results = await runModels(inputs, hops, opts, progress);
+
+  for (const { unit, masked, pieces } of jobs) {
+    if (pieces.length === 0) {
+      unit.result = unit.text; // nothing to translate: placeholders, numbers, punctuation
+      continue;
+    }
+    let ok = true;
+    const found: Issue[] = [];
+    const joined = pieces
+      .map((p) => {
+        // No spaces between sentences in Chinese, Japanese, Thai...
+        if (!p.translate) return NO_SPACES.test(opts.targetLang) ? p.value.replace(/^[ \t]+$/, "") : p.value;
+        const out = results.get(prepare(p.value)) ?? "";
+        if (isDegenerate(p.value, out)) ok = false;
+        else if (out.length > 3 * p.value.length + 20) found.push({ source: unit.owner, kind: "suspicious-length", output: out });
+        else if (/(\b\p{L}+\b)(?:\W+\1\b){3,}/u.test(out)) found.push({ source: unit.owner, kind: "repetition", output: out });
+        return postprocess(p.value, out, opts.targetLang);
+      })
+      .join("");
+    const restored = ok ? unmask(joined, masked) : undefined;
+    if (restored === undefined) failed.push(unit);
+    else {
+      unit.result = fixTagSpacing(unit.text, restored, masked.tokens);
+      issues.push(...found);
+    }
+  }
+  return failed;
+}
+
+/**
+ * Last resort: translate the text between placeholders separately and keep the
+ * placeholders in their source positions. Always structurally valid, sometimes clunky.
+ */
+async function splitFallback(
+  units: Unit[],
+  hops: Translator[],
+  opts: EngineOptions,
+  progress: Progress,
+  issues: Issue[],
+): Promise<void> {
+  const jobs = units.map((unit) => ({ unit, masked: mask(unit.text, "natural", opts.protect) }));
+  const chunks = new Set<string>();
+  for (const { masked } of jobs) {
+    for (const part of splitOnTokens(masked.text)) {
+      if (!part.token && hasTranslatableText(part.value)) {
+        chunks.add(prepare(/^[\s\p{P}]*([\s\S]*?)[\s\p{P}]*$/u.exec(part.value)![1]));
+      }
+    }
+  }
+  const results = await runModels(chunks, hops, opts, progress);
+  for (const { unit, masked } of jobs) {
+    const text = splitOnTokens(masked.text)
+      .map((part) => {
+        if (part.token || !hasTranslatableText(part.value)) return part.value;
+        const [, lead, core, trail] = /^([\s\p{P}]*)([\s\S]*?)([\s\p{P}]*)$/u.exec(part.value)!;
+        const out = results.get(prepare(core)) ?? "";
+        const text = isDegenerate(core, out) ? core : postprocess(core, out, opts.targetLang);
+        return NO_SPACES.test(opts.targetLang)
+          ? lead.replace(/\s+/g, "") + text + trail.replace(/\s+/g, "")
+          : lead + text + trail;
+      })
+      .join("");
+    const finalText = /^zh\b/.test(opts.targetLang) ? fixCjk(text) : text;
+    unit.result = unmask(finalText, masked) ?? unit.text;
+    issues.push({ source: unit.owner, kind: "placeholder-fallback", output: unit.result });
+  }
+}
+
+export async function translateStrings(
+  strings: string[],
+  hops: Translator[],
+  opts: EngineOptions,
+): Promise<EngineResult> {
+  const issues: Issue[] = [];
+  const progress: Progress = { done: 0, total: 0 };
+
+  const translations = new Map<string, string>();
+  const remaining: string[] = [];
+  for (const s of new Set(strings)) {
+    const hit = opts.lookup?.(s);
+    if (hit !== undefined) translations.set(s, hit);
+    else remaining.push(s);
+  }
+
+  const plans = remaining.map((s) => {
+    const icu = extractIcu(s);
+    return { source: s, icu, units: (icu?.units ?? [s]).map((text): Unit => ({ text, owner: s })) };
+  });
+  const units = plans.flatMap((p) => p.units);
+
+  let pending = units;
+  for (const style of ["natural", "numeric", "opaque"] as const) {
+    if (pending.length) pending = await attempt(pending, style, hops, opts, progress, issues);
+  }
+  if (pending.length) await splitFallback(pending, hops, opts, progress, issues);
+
+  for (const p of plans) {
+    const parts = p.units.map((u) => u.result ?? u.text);
+    translations.set(p.source, p.icu ? p.icu.rebuild(parts) : parts[0]);
+  }
+  return { translations, issues };
+}

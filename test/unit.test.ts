@@ -1,0 +1,276 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { test } from "node:test";
+import { reachableTargets, resolveRoute } from "../src/catalog.ts";
+import { translateStrings } from "../src/engine.ts";
+import { extractIcu } from "../src/icu.ts";
+import { parseLocale } from "../src/lang.ts";
+import { addPluralForms, buildTarget, detectLayout, pendingStrings, sourceFiles, targetFile } from "../src/locales.ts";
+import type { Translator } from "../src/models.ts";
+import { hasTranslatableText, mask, unmask } from "../src/placeholders.ts";
+import { splitSentences } from "../src/segment.ts";
+
+test("mask protects common placeholder syntaxes", () => {
+  const cases: Array<[string, string[]]> = [
+    ["Hello {name}!", ["{name}"]],
+    ["Hi {{user.name}}, {{count}} new", ["{{user.name}}", "{{count}}"]],
+    ["%s of %d, %1$s, %.2f, %@", ["%s", "%d", "%1$s", "%.2f", "%@"]],
+    ["Value: %(amount)s and %{total}", ["%(amount)s", "%{total}"]],
+    ["Click <a href=\"https://x.io/a\">here</a>", ['<a href="https://x.io/a">', "</a>"]],
+    ["Press <0>Save</0> then <1/>", ["<0>", "</0>", "<1/>"]],
+    ["See $t(common.terms) and @:app.name", ["$t(common.terms)", "@:app.name"]],
+    ["Mail support@acme.com or visit https://acme.com.", ["support@acme.com", "https://acme.com"]],
+    ["The :attribute field is required", [":attribute"]],
+    ["Tom&nbsp;&amp;&nbsp;Jerry", ["&nbsp;", "&amp;", "&nbsp;"]],
+  ];
+  for (const [input, expected] of cases) {
+    assert.deepEqual(mask(input).tokens, expected, input);
+  }
+});
+
+test("mask leaves ordinary text alone", () => {
+  for (const s of ["100% sure", "Note: read this", "Price $5", "a < b > c", "Hello world."]) {
+    assert.deepEqual(mask(s).tokens, [], s);
+  }
+});
+
+test("natural markers: {n} for variables, <n>…</n> for tags", () => {
+  assert.equal(mask("Hi {{name}}, see <a href=\"/x\">this</a><br/> or <b>that</b>").text, "Hi {0}, see <0>this</0><1/> or <2>that</2>");
+  assert.equal(mask("Press <0>Save</0> then <1/>").text, "Press <0>Save</0> then <1/>");
+  assert.equal(mask("Hi {{name}} <b>x</b>", "opaque").text, "Hi _P0_ _P1_x_P2_");
+});
+
+test("unmask restores markers and tolerates light damage", () => {
+  const m = mask("Hello {name}, you have {count} messages");
+  assert.equal(unmask("Bonjour {0}, vous avez {1} messages", m), "Bonjour {name}, vous avez {count} messages");
+  assert.equal(unmask("Bonjour { 0 }, vous avez {1 } messages", m), "Bonjour {name}, vous avez {count} messages");
+  assert.equal(unmask("Bonjour, vous avez {1} messages", m), undefined, "missing marker");
+  assert.equal(unmask("{0} {0} {1}", m), undefined, "duplicated marker");
+  assert.equal(unmask("{0} {1} {2}", m), undefined, "invented marker");
+  const o = mask("Hello {name}", "opaque");
+  assert.equal(unmask("Bonjour __ P0 __", o), "Bonjour {name}");
+});
+
+test("unmask rejects swapped tags but allows reordered pairs", () => {
+  const m = mask("<b>Bold</b> and <i>italic</i>");
+  assert.equal(unmask("<1>italique</1> et <0>gras</0>", m), "<i>italique</i> et <b>gras</b>");
+  assert.equal(unmask("</0>gras<0> et <1>italique</1>", m), undefined);
+});
+
+test("hasTranslatableText needs real words", () => {
+  assert.equal(hasTranslatableText("{0} / {1}"), false);
+  assert.equal(hasTranslatableText("123 - 456"), false);
+  assert.equal(hasTranslatableText("v{0}"), false);
+  assert.equal(hasTranslatableText("{0} items"), true);
+});
+
+test("splitSentences keeps separators and splits sentences", () => {
+  const pieces = splitSentences("Upload failed. Please try again.\nThanks!", "en");
+  assert.deepEqual(
+    pieces.filter((p) => p.translate).map((p) => p.value),
+    ["Upload failed.", "Please try again.", "Thanks!"],
+  );
+  assert.equal(pieces.map((p) => p.value).join(""), "Upload failed. Please try again.\nThanks!");
+});
+
+test("ICU plural/select extraction and rebuild", () => {
+  const s = "{count, plural, =0 {No files} one {# file} other {# files}} in {folder}";
+  const icu = extractIcu(s)!;
+  assert.deepEqual(icu.units, ["No files", "{__HASH__} file", "{__HASH__} files", " in {folder}"]);
+  const out = icu.rebuild(["Aucun fichier", "{__HASH__} fichier", "{__HASH__} fichiers", " dans {folder}"]);
+  assert.equal(out, "{count, plural, =0 {Aucun fichier} one {# fichier} other {# fichiers}} dans {folder}");
+
+  const nested = extractIcu("{gender, select, male {He has {n, plural, one {# cat} other {# cats}}} other {They have pets}}")!;
+  assert.deepEqual(nested.units, ["He has ", "{__HASH__} cat", "{__HASH__} cats", "They have pets"]);
+  assert.equal(extractIcu("{count, plural, one {broken}"), undefined);
+  assert.equal(extractIcu("Hello {name}"), undefined);
+});
+
+test("routes: direct, multi-target prefix, pivot, unsupported", () => {
+  const en = parseLocale("en");
+  assert.deepEqual(resolveRoute(en, parseLocale("fr"))!.map((h) => h.model.id), ["en-fr"]);
+  const pt = resolveRoute(en, parseLocale("pt-BR"))!;
+  assert.equal(pt[0].model.id, "en-ROMANCE");
+  assert.equal(pt[0].prefix, ">>pt_BR<<");
+  assert.equal(resolveRoute(en, parseLocale("zh-TW"))![0].prefix, ">>cmn_Hant<<");
+  assert.equal(resolveRoute(en, parseLocale("ar"))![0].prefix, ">>ara<<");
+  assert.deepEqual(resolveRoute(parseLocale("ja"), parseLocale("fr"))!.map((h) => h.model.id), ["ja-en", "en-fr"]);
+  assert.equal(resolveRoute(en, parseLocale("en-GB")), undefined);
+  assert.equal(resolveRoute(en, parseLocale("tlh")), undefined);
+  assert.ok(reachableTargets("en").includes("de"));
+});
+
+test("parseLocale normalizes tags", () => {
+  assert.deepEqual(parseLocale("pt_br"), { tag: "pt_br", lang: "pt", region: "BR" });
+  assert.deepEqual(parseLocale("zh-hant-TW"), { tag: "zh-hant-TW", lang: "zh", script: "Hant", region: "TW" });
+  assert.equal(parseLocale("nb").lang, "no");
+  assert.throws(() => parseLocale("../etc"));
+});
+
+test("buildTarget keeps existing translations, order and extra keys", () => {
+  const src = { a: "Hello", b: { c: "World", d: 3 }, e: ["One", "Two"], f: "" };
+  const existing = { b: { c: "Monde" }, zz: "kept" };
+  assert.deepEqual(pendingStrings(src, existing, false), ["Hello", "One", "Two", ""]);
+  const out = buildTarget(src, existing, (s) => `[${s}]`, false);
+  assert.equal(JSON.stringify(out), JSON.stringify({ a: "[Hello]", b: { c: "Monde", d: 3 }, e: ["[One]", "[Two]"], f: "[]", zz: "kept" }));
+  assert.equal(JSON.stringify(buildTarget(src, existing, (s) => `[${s}]`, true)).includes("[World]"), true);
+});
+
+test("buildTarget treats __proto__ keys as data", () => {
+  const src = JSON.parse('{"__proto__": {"polluted": "yes"}}');
+  const out = buildTarget(src, undefined, (s) => s, false) as Record<string, unknown>;
+  assert.equal(({} as Record<string, unknown>).polluted, undefined);
+  assert.equal(JSON.stringify(out), '{"__proto__":{"polluted":"yes"}}');
+});
+
+test("addPluralForms adds the forms the target language needs", () => {
+  const doc = { item_one: "1 élément", item_other: "{{count}} éléments", gender_other: "Autre", x: 1 };
+  const ar = addPluralForms(doc, "ar");
+  assert.deepEqual(Object.keys(ar.doc as object), [
+    "item_zero", "item_one", "item_two", "item_few", "item_many", "item_other", "gender_other", "x",
+  ]);
+  assert.equal(ar.added, 4);
+  assert.equal(addPluralForms(doc, "ja").added, 0);
+  // Idempotent: running again on the result changes nothing.
+  const again = addPluralForms(ar.doc, "ar");
+  assert.equal(again.added, 0);
+  assert.equal(JSON.stringify(again.doc), JSON.stringify(ar.doc));
+});
+
+test("detects dir and file layouts", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-"));
+  fs.mkdirSync(path.join(root, "src/locales/en/admin"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/locales/en/common.json"), "{}");
+  fs.writeFileSync(path.join(root, "src/locales/en/admin/users.json"), "{}");
+  const l = detectLayout(root, "en");
+  assert.deepEqual(l, { kind: "dir", root: path.join(root, "src/locales") });
+  const files = sourceFiles(l, "en");
+  assert.equal(files.length, 2);
+  assert.equal(targetFile(l, "en", "fr", files[0]), path.join(root, "src/locales/fr/admin/users.json"));
+
+  fs.mkdirSync(path.join(root, "messages"));
+  fs.writeFileSync(path.join(root, "messages/en.json"), "{}");
+  const f = detectLayout(root, "en", "messages");
+  assert.equal(targetFile(f, "en", "de", sourceFiles(f, "en")[0]), path.join(root, "messages/de.json"));
+  assert.throws(() => detectLayout(root, "xx"));
+});
+
+/** A fake model: uppercases words, keeps tokens, optionally drops one. */
+function fakeTranslator(fn: (s: string) => string): Translator {
+  return { translate: async (texts) => texts.map(fn), dispose: async () => {} };
+}
+
+test("engine: sentences, placeholders, caps, punctuation, fallback", async () => {
+  const tr = fakeTranslator((s) => {
+    if (s.includes("drop")) return s.replace(/\{1\}|_P1_|901/, "");
+    return `«${s.replace(/\.$/, "")}».`;
+  });
+  const { translations, issues } = await translateStrings(
+    ["Hello {name}. Bye.", "SAVE", "Settings", "{{count}}", "keep __P0__ drop {a} {b}", "{n, plural, one {# day} other {# days}}"],
+    [tr],
+    { sourceLang: "en", targetLang: "fr", batchSize: 2 },
+  );
+  assert.equal(translations.get("Hello {name}. Bye."), "«Hello {name}». «Bye».");
+  assert.equal(translations.get("SAVE"), "«SAVE»");
+  assert.equal(translations.get("Settings"), "«Settings»", "no trailing period added to labels");
+  assert.equal(translations.get("{{count}}"), "{{count}}", "placeholder-only strings are copied");
+  assert.equal(translations.get("{n, plural, one {# day} other {# days}}"), "{n, plural, one {«# day»} other {«# days»}}");
+  assert.ok(issues.some((i) => i.kind === "placeholder-fallback"));
+  const fb = translations.get("keep __P0__ drop {a} {b}")!;
+  assert.ok(fb.includes("{a}") && fb.includes("{b}"), fb);
+});
+
+test("glossary: built-in UI terms, project overrides, casing and punctuation", async () => {
+  const { glossaryLookup, protectRegex } = await import("../src/glossary.ts");
+  const en = parseLocale("en");
+  const fr = glossaryLookup(en, parseLocale("fr"), { glossary: { fr: { Home: "Page d'accueil" } } });
+  assert.equal(fr("Sign in"), "Se connecter");
+  assert.equal(fr("SIGN IN"), "SE CONNECTER");
+  assert.equal(fr("Loading…"), "Chargement…");
+  assert.equal(fr("Password:"), "Mot de passe :");
+  assert.equal(fr("Home"), "Page d'accueil", "project glossary wins");
+  assert.equal(fr("Sign in to continue"), undefined, "whole strings only");
+  assert.equal(glossaryLookup(en, parseLocale("pt-PT"), {})("Save"), undefined, "pt-BR terms not used for pt-PT");
+  assert.equal(glossaryLookup(parseLocale("de"), parseLocale("fr"), {})("Save"), undefined, "English sources only");
+  const re = protectRegex({ doNotTranslate: ["Acme", "Acme Pro"] })!;
+  assert.deepEqual(mask("Upgrade to Acme Pro today", "natural", re).tokens, ["Acme Pro"]);
+  assert.deepEqual(mask("Acmeville is not Acme", "natural", re).tokens, ["Acme"]);
+});
+
+test("engine: count stays before the noun, tag spacing restored", async () => {
+  const tr = fakeTranslator((s) => (s === "{0} file" ? "Fichier {0}" : s.replace("<0>", "<0> ")));
+  const { translations } = await translateStrings(["{n} file", "Read the <b>terms</b>"], [tr], {
+    sourceLang: "en",
+    targetLang: "fr",
+    batchSize: 4,
+  });
+  assert.equal(translations.get("{n} file"), "{n} fichier");
+  assert.equal(translations.get("Read the <b>terms</b>"), "Read the <b>terms</b>");
+});
+
+test("numeric markers: restore, reject collisions", async () => {
+  const { numericStyleSafe } = await import("../src/placeholders.ts");
+  const m = mask("Hi {name}, <b>{count}</b> new", "numeric");
+  assert.equal(m.text, "Hi 900, 901 new");
+  assert.equal(unmask("Привет, 900, 901 новых", m), "Привет, {name}, <b>{count}</b> новых");
+  assert.equal(unmask("Привет, 900 новых", m), undefined);
+  assert.equal(numericStyleSafe("Call 911 now"), false);
+  assert.equal(numericStyleSafe("Call 1911 or 9000"), true);
+});
+
+test("engine: retries a failing style with numeric markers; fallback keeps punctuation", async () => {
+  // Drops brace markers (like en-ru does) but keeps numbers.
+  const tr = fakeTranslator((s) => s.replace(/\{\d+\}/g, "").replace("Hello", "Привет"));
+  const { translations, issues } = await translateStrings(["Hello {{name}}, welcome"], [tr], {
+    sourceLang: "en",
+    targetLang: "ru",
+    batchSize: 4,
+  });
+  assert.equal(translations.get("Hello {{name}}, welcome"), "Привет {{name}}, welcome");
+  assert.equal(issues.length, 0);
+
+  const dropAll = fakeTranslator((s) => s.replace(/\{\d+\}|9\d\d|_P\d+_/g, "").replace("you have", "у вас"));
+  const r = await translateStrings(["Hello {{name}}, you have {{n}} messages"], [dropAll], {
+    sourceLang: "en",
+    targetLang: "ru",
+    batchSize: 4,
+  });
+  assert.equal(r.translations.get("Hello {{name}}, you have {{n}} messages"), "Hello {{name}}, у вас {{n}} messages");
+});
+
+test("custom models: config entries win over built-ins, prefixes per target", async () => {
+  const { customEntries, resolveRoute, CATALOG } = await import("../src/catalog.ts");
+  const custom = customEntries(
+    [
+      { source: "en", target: ["ar", "ary"], path: "models/en-ar", prefix: { ar: ">>ara<<", ary: ">>ary<<" } },
+      { id: "my-ko", source: "en", target: "ko", repo: "me/opus-mt-en-ko-onnx" },
+    ],
+    "/project",
+  );
+  const catalog = [...custom, ...CATALOG];
+  const en = parseLocale("en");
+  const ar = resolveRoute(en, parseLocale("ar"), catalog)!;
+  assert.equal(ar[0].model.path, path.resolve("/project", "models/en-ar"));
+  assert.equal(ar[0].prefix, ">>ara<<");
+  assert.equal(resolveRoute(en, parseLocale("ary"), catalog)![0].prefix, ">>ary<<");
+  assert.equal(resolveRoute(en, parseLocale("ko"), catalog)![0].model.id, "my-ko");
+  assert.equal(resolveRoute(en, parseLocale("ko")), undefined, "not available without config");
+  // Pivot through a custom model: ja -> en (built-in) -> ko (custom).
+  assert.deepEqual(resolveRoute(parseLocale("ja"), parseLocale("ko"), catalog)!.map((h) => h.model.id), ["ja-en", "my-ko"]);
+  assert.throws(() => customEntries([{ source: "en", target: "ko" }], "/"), /exactly one of "repo" or "path"/);
+});
+
+test("SentencePiece encoder matches the reference segmentation (if a model is cached)", async (t) => {
+  const { SentencePiece } = await import("../src/spm.ts");
+  const { cacheRoot } = await import("../src/models.ts");
+  const spm = path.join(cacheRoot(), "models/Xenova/opus-mt-en-fr/source.spm");
+  if (!fs.existsSync(spm)) return t.skip("en-fr model not installed");
+  const sp = new SentencePiece(fs.readFileSync(spm));
+  // Expected values produced by Python sentencepiece 0.2.
+  assert.deepEqual(sp.encode("This action cannot be undone."), ["▁This", "▁action", "▁cannot", "▁be", "▁und", "one", "."]);
+  assert.deepEqual(sp.encode("Zero​width"), ["▁Zero", "▁width"]);
+  assert.deepEqual(sp.encode("  Hello   world\t\tagain  "), sp.encode("Hello world again"));
+  assert.deepEqual(sp.encode(""), []);
+});

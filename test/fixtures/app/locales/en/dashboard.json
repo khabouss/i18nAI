@@ -1,0 +1,13 @@
+{
+  "title": "Dashboard",
+  "welcome": "Welcome to your dashboard, {name}!",
+  "stats": {
+    "revenue": "Revenue",
+    "activeUsers": "Active users",
+    "churn": "Churn rate"
+  },
+  "invite": "Invite your team",
+  "steps": ["Create a project", "Invite your teammates", "Start collaborating"],
+  "limit": 25,
+  "beta": true
+}

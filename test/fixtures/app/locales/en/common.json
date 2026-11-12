@@ -1,0 +1,29 @@
+{
+  "appName": "Acme",
+  "nav": {
+    "home": "Home",
+    "settings": "Settings",
+    "billing": "Billing",
+    "logout": "Log out",
+    "search": "Search…"
+  },
+  "actions": {
+    "save": "Save changes",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "confirmDelete": "Are you sure you want to delete this item? This action cannot be undone.",
+    "retry": "Upload failed. Please try again later.",
+    "cta": "GET STARTED"
+  },
+  "greeting": "Hello {{name}}, you have {{count}} new messages.",
+  "lastUpdated": "Last updated {{time}}",
+  "terms": "By signing up, you agree to our <0>Terms of Service</0> and <1>Privacy Policy</1>.",
+  "empty": "No results found",
+  "item_one": "{{count}} item",
+  "item_other": "{{count}} items",
+  "files": "{count, plural, =0 {No files} one {# file} other {# files}} selected",
+  "contact": "Questions? Email us at support@acme.com.",
+  "multiline": "Your export is ready.\nIt will be available for 7 days.",
+  "version": "v{{version}}",
+  "separator": " / "
+}
