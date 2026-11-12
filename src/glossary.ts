@@ -80,6 +80,12 @@ const TABLE: Record<string, [string, string, string, string, string, string, str
 export interface ProjectConfig {
   /** Terms copied verbatim (brand and product names). */
   doNotTranslate?: string[];
+  /**
+   * Key paths copied verbatim, dot/`[i]` notation ("brand.name", "config.statusEnum").
+   * Protects an enum array, or a field whose text a model might otherwise respell
+   * or inflect, without enumerating every value "doNotTranslate" would need.
+   */
+  doNotTranslateKeys?: string[];
   /** Exact-string overrides per target locale: { "fr": { "Home": "Accueil" } }. */
   glossary?: Record<string, Record<string, string>>;
   /** Extra translation models (local folders or Hugging Face repos). */
@@ -99,6 +105,7 @@ export function loadConfig(cwd: string, file?: string): ProjectConfig {
   try {
     const cfg = JSON.parse(fs.readFileSync(p, "utf8")) as ProjectConfig;
     if (cfg.doNotTranslate && !Array.isArray(cfg.doNotTranslate)) throw new Error('"doNotTranslate" must be an array');
+    if (cfg.doNotTranslateKeys && !Array.isArray(cfg.doNotTranslateKeys)) throw new Error('"doNotTranslateKeys" must be an array');
     if (cfg.models && !Array.isArray(cfg.models)) throw new Error('"models" must be an array');
     return { ...cfg, dir: path.dirname(p) };
   } catch (e) {

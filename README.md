@@ -31,7 +31,7 @@ Download 577 MB? (Y/n)
 - **Layouts**: `locales/en/*.json` (nested folders too) → `locales/fr/...`, or `messages/en.json` → `messages/fr.json`. `.json`, `.yaml`, `.yml`, `.po` (gettext), `.arb` (Flutter) and `.strings` (Apple) are all supported, mixed freely in the same project. Common folders (`locales`, `src/locales`, `public/locales`, `src/i18n`, `messages`, `lang`, ...) are found automatically, or pass `--input`.
 - **Placeholders are never translated or lost**: `{name}`, `{{count}}`, `%s`, `%1$s`, `%(name)s`, `%{name}`, `${name}`, `:attribute`, `$t(key)`, `@:key`, `<b>…</b>`, `<0>…</0>`, `&nbsp;`, URLs, e-mails.
 - **ICU MessageFormat**: `{count, plural, one {# file} other {# files}}`, `select`, nesting. Only the text is translated.
-- **i18next plurals**: adds the forms the target language needs (`_few`, `_many` for Arabic, Russian, Polish...), so the app doesn't fall back to the English string — each added form copies the `_other` translation verbatim rather than inflecting it, so review and adjust the wording of `_zero`/`_two`/`_few`/`_many` by hand for languages where those forms use a different noun/adjective form.
+- **i18next plurals**: adds the forms the target language needs (`_few`, `_many` for Arabic, Russian, Polish...), so the app doesn't fall back to the English string — each added form copies the `_other` translation verbatim rather than inflecting it, so review and adjust the wording of `_zero`/`_two`/`_few`/`_many` by hand for languages where those forms use a different noun/adjective form. The `_one` form is translated with its `{{count}}` temporarily replaced by a literal "1", since the model otherwise sometimes picks the target's plural noun form despite the English source being grammatically singular.
 - **Incremental**: only missing keys are translated, existing translations are kept, re-runs are no-ops. `--overwrite` re-translates everything.
 - **Structure**: key order, numbers, booleans, arrays, indentation and trailing newline are preserved.
 
@@ -69,6 +69,7 @@ Models are cached once per machine in `~/.cache/locale-ai` (`LOCALE_AI_CACHE` to
 ```json
 {
   "doNotTranslate": ["Acme", "Acme Pro"],
+  "doNotTranslateKeys": ["brand.name", "config.statusEnum"],
   "glossary": {
     "fr": { "Workspace": "Espace de travail" },
     "de": { "Sign in": "Einloggen" }
@@ -77,6 +78,8 @@ Models are cached once per machine in `~/.cache/locale-ai` (`LOCALE_AI_CACHE` to
 ```
 
 `glossary` entries replace whole strings. `models` adds your own translation models (next section). A built-in glossary covers ~60 standard UI labels ("Sign in", "Settings", "Log out", ...) for fr, es, de, it, pt-BR, nl and ar, because one-to-three word labels are where sentence-level MT is weakest.
+
+`doNotTranslate` protects a term everywhere it appears in any string. `doNotTranslateKeys` instead protects a key path (dot/`[i]` notation, e.g. `brand.name`, `items[0]`) — the whole value at that path, and everything nested under it if it's an object or array, is copied to every target verbatim. Use it for an enum array (`"statusEnum": ["ACTIVE", "PENDING"]`, which you'd otherwise have to list value-by-value in `doNotTranslate`) or a field a model might respell or inflect even when the word is listed in `doNotTranslate` elsewhere in the same string.
 
 ## Add a language, or a better model
 

@@ -23,7 +23,9 @@ import {
   detectLayout,
   existingTargets,
   flattenStrings,
+  keyPathProtect,
   pendingStrings,
+  pluralOneStrings,
   readLocaleDoc,
   sourceFiles,
   targetFile,
@@ -205,8 +207,10 @@ async function cmdTranslate(argv: string[]): Promise<number> {
   const config = loadConfig(process.cwd(), values.config);
   const catalog = catalogFor(config);
   const protect = protectRegex(config);
+  const isProtectedKey = keyPathProtect(config.doNotTranslateKeys);
   const layout = detectLayout(process.cwd(), from.tag, values.input);
   const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag) }));
+  const singularHints = new Set(sources.flatMap(({ doc }) => [...pluralOneStrings(doc.data)]));
   log(`locale-ai ${VERSION}`);
   log(
     `Found ${sources.length} ${from.tag} file${sources.length === 1 ? "" : "s"} in ${rel(layout.root)}/` +
@@ -227,7 +231,13 @@ async function cmdTranslate(argv: string[]): Promise<number> {
     const files = sources.map(({ file, doc }): FileJob => {
       const target = targetFile(layout, from.tag, locale.tag, file);
       const existing = fs.existsSync(target) ? readLocaleDoc(target, locale.tag).data : undefined;
-      return { source: file, target, doc, existing, pending: pendingStrings(doc.data, existing, values.overwrite!) };
+      return {
+        source: file,
+        target,
+        doc,
+        existing,
+        pending: pendingStrings(doc.data, existing, values.overwrite!, isProtectedKey),
+      };
     });
     const unique = new Set(files.flatMap((f) => f.pending)).size;
     jobs.push({ locale, route, files, unique });
@@ -275,6 +285,7 @@ async function cmdTranslate(argv: string[]): Promise<number> {
         batchSize,
         protect,
         lookup: glossaryLookup(from, job.locale, config),
+        singularHints,
         onProgress: makeProgress((d, t) => `${job.locale.tag}: translating ${bar(d, t)} ${d}/${t}`),
       });
       endStatus();
@@ -292,7 +303,7 @@ async function cmdTranslate(argv: string[]): Promise<number> {
     let written = 0;
     let pluralsAdded = 0;
     for (const f of job.files) {
-      const built = buildTarget(f.doc.data, f.existing, (s) => translations.get(s) ?? s, values.overwrite!);
+      const built = buildTarget(f.doc.data, f.existing, (s) => translations.get(s) ?? s, values.overwrite!, isProtectedKey);
       const { doc, added } = addPluralForms(built, intlCode(job.locale));
       pluralsAdded += added;
       const before = fs.existsSync(f.target) ? fs.readFileSync(f.target, "utf8") : undefined;

@@ -23,6 +23,8 @@ export interface EngineOptions {
   protect?: RegExp;
   /** Whole-string glossary; a hit skips the model. */
   lookup?: (s: string) => string | undefined;
+  /** Source strings at a cardinal i18next "_one" plural key (see locales.ts's pluralOneStrings). */
+  singularHints?: Set<string>;
   onProgress?: (done: number, total: number) => void;
 }
 
@@ -284,6 +286,41 @@ async function splitFallback(
   }
 }
 
+const COUNT_PLACEHOLDER = /\{\{\s*count\s*\}\}/;
+
+/**
+ * A "_one" key's source is grammatically singular ("You have {{count}} file"), but the
+ * masked marker that stands in for {{count}} carries no number of its own, so the model
+ * sometimes still produces the target's PLURAL noun form (confirmed: en→fr "fileCount_one"
+ * came back "Vous avez {{count}} fichiers"). Retranslating with a literal "1" in place of
+ * {{count}} gives the model the real grammatical cue; only applied when {{count}} is the
+ * string's only placeholder (anything else needs the normal masking pipeline to survive),
+ * and only kept when the "1" survives translation intact enough to restore {{count}}.
+ */
+async function fixSingularGrammar(
+  translations: Map<string, string>,
+  singularHints: Set<string>,
+  remaining: Set<string>,
+  hops: Translator[],
+  opts: EngineOptions,
+  progress: Progress,
+): Promise<void> {
+  for (const s of singularHints) {
+    if (!remaining.has(s) || translations.get(s) === undefined) continue;
+    const tokens = mask(s, "natural").tokens;
+    if (tokens.length !== 1 || !COUNT_PLACEHOLDER.test(tokens[0])) continue;
+    const m = COUNT_PLACEHOLDER.exec(s)!;
+    const pinned = s.slice(0, m.index) + "1" + s.slice(m.index + m[0].length);
+    const prepared = prepare(pinned);
+    const out = (await runModels(new Set([prepared]), hops, opts, progress)).get(prepared) ?? "";
+    if (isDegenerate(pinned, out)) continue;
+    const post = postprocess(pinned, out, opts.targetLang);
+    const restored = /(?<![\d.])1(?![\d.])/.exec(post);
+    if (!restored) continue; // can't confirm the "1" survived: keep the original translation
+    translations.set(s, post.slice(0, restored.index) + m[0] + post.slice(restored.index + 1));
+  }
+}
+
 export async function translateStrings(
   strings: string[],
   hops: Translator[],
@@ -316,5 +353,6 @@ export async function translateStrings(
     const parts = p.units.map((u) => u.result ?? u.text);
     translations.set(p.source, p.split ? p.split.rebuild(parts) : parts[0]);
   }
+  if (opts.singularHints?.size) await fixSingularGrammar(translations, opts.singularHints, new Set(remaining), hops, opts, progress);
   return { translations, issues };
 }

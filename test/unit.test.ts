@@ -14,7 +14,9 @@ import {
   detectLayout,
   existingTargets,
   flattenStrings,
+  keyPathProtect,
   pendingStrings,
+  pluralOneStrings,
   readLocaleDoc,
   sourceFiles,
   targetFile,
@@ -152,6 +154,27 @@ test("buildTarget treats __proto__ keys as data", () => {
   assert.equal(JSON.stringify(out), '{"__proto__":{"polluted":"yes"}}');
 });
 
+test("keyPathProtect: protects an exact path and everything nested under it (an enum array)", () => {
+  const src = {
+    brand: { name: "Acme", tagline: "Acme makes your work easier" },
+    config: { statusEnum: ["ACTIVE", "PENDING"] },
+    greeting: "Welcome",
+  };
+  const isProtected = keyPathProtect(["brand.name", "config.statusEnum"]);
+  assert.deepEqual(pendingStrings(src, undefined, false, isProtected).sort(), [
+    "Acme makes your work easier",
+    "Welcome",
+  ]);
+  const built = buildTarget(src, undefined, () => "[translated]", false, isProtected) as typeof src;
+  assert.equal(built.brand.name, "Acme", "protected leaf is copied verbatim");
+  assert.deepEqual(built.config.statusEnum, ["ACTIVE", "PENDING"], "protected array is untouched");
+  assert.equal(built.brand.tagline, "[translated]", "an unprotected sibling still translates");
+  assert.equal(built.greeting, "[translated]");
+
+  assert.equal(keyPathProtect(undefined), undefined);
+  assert.equal(keyPathProtect([]), undefined);
+});
+
 test("addPluralForms adds the forms the target language needs", () => {
   const doc = { item_one: "1 élément", item_other: "{{count}} éléments", gender_other: "Autre", x: 1 };
   const ar = addPluralForms(doc, "ar");
@@ -164,6 +187,17 @@ test("addPluralForms adds the forms the target language needs", () => {
   const again = addPluralForms(ar.doc, "ar");
   assert.equal(again.added, 0);
   assert.equal(JSON.stringify(again.doc), JSON.stringify(ar.doc));
+});
+
+test("pluralOneStrings: finds cardinal _one values, ignores ordinals and other categories", () => {
+  const doc = {
+    itemCount_one: "{{count}} item",
+    itemCount_other: "{{count}} items",
+    nested: { fileCount_one: "You have {{count}} file", fileCount_other: "You have {{count}} files" },
+    list: [{ rank_ordinal_one: "{{count}}st place" }],
+    plain: "not a plural key",
+  };
+  assert.deepEqual(pluralOneStrings(doc), new Set(["{{count}} item", "You have {{count}} file"]));
 });
 
 test("detects dir and file layouts", () => {
@@ -490,6 +524,36 @@ test("engine: a suspicious batched output is retried alone, and the clean retry 
   const r2 = await translateStrings(["Good morning"], [stuck], { sourceLang: "en", targetLang: "fr", batchSize: 4 });
   assert.equal(r2.translations.get("Good morning"), "Non non non non non");
   assert.ok(r2.issues.some((i) => i.kind === "repetition"));
+});
+
+test("engine: an i18next _one string is retranslated with a literal 1, fixing the wrong plural noun", async () => {
+  // Simulates a measured real bug: given the masked {0} marker, the model infers the
+  // target's PLURAL noun form even though the English source is singular; given the
+  // real number "1" instead, it gets the grammar right.
+  const grammarSensitive: Translator = {
+    translate: async (texts) =>
+      texts.map((s) => {
+        if (s === "You have {0} file") return "Vous avez {0} fichiers";
+        if (s === "You have 1 file") return "Vous avez 1 fichier";
+        return s;
+      }),
+    dispose: async () => {},
+  };
+  const source = "You have {{count}} file";
+  const withoutHint = await translateStrings([source], [grammarSensitive], {
+    sourceLang: "en",
+    targetLang: "fr",
+    batchSize: 4,
+  });
+  assert.equal(withoutHint.translations.get(source), "Vous avez {{count}} fichiers", "unfixed without the hint");
+
+  const withHint = await translateStrings([source], [grammarSensitive], {
+    sourceLang: "en",
+    targetLang: "fr",
+    batchSize: 4,
+    singularHints: new Set([source]),
+  });
+  assert.equal(withHint.translations.get(source), "Vous avez {{count}} fichier");
 });
 
 test("custom models: config entries win over built-ins, prefixes per target", async () => {

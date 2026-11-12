@@ -480,47 +480,95 @@ export function flattenStrings(
   return out;
 }
 
-export function pendingStrings(source: unknown, existing: unknown, overwrite: boolean, out: string[] = []): string[] {
-  if (typeof source === "string") {
-    if (needsTranslation(existing, overwrite)) out.push(source);
-  } else if (Array.isArray(source)) {
-    source.forEach((v, i) => pendingStrings(v, Array.isArray(existing) ? existing[i] : undefined, overwrite, out));
-  } else if (isObj(source)) {
-    for (const k of Object.keys(source)) pendingStrings(source[k], isObj(existing) ? existing[k] : undefined, overwrite, out);
-  }
+/**
+ * True when `path` is, or is nested under, one of `doNotTranslateKeys` — the same
+ * dot/`[i]` notation flattenStrings produces (e.g. "brand.name", "config.statusEnum").
+ * Protecting a path that points at an object or array protects every string nested
+ * under it too, which is what makes an enum array ("statusEnum": ["ACTIVE", ...])
+ * protectable without enumerating each value as a doNotTranslate term.
+ */
+export function keyPathProtect(doNotTranslateKeys: string[] | undefined): ((path: string) => boolean) | undefined {
+  const keys = (doNotTranslateKeys ?? []).filter(Boolean);
+  if (!keys.length) return undefined;
+  return (path: string) => keys.some((k) => path === k || path.startsWith(`${k}.`) || path.startsWith(`${k}[`));
+}
+
+export function pendingStrings(
+  source: unknown,
+  existing: unknown,
+  overwrite: boolean,
+  isProtected?: (path: string) => boolean,
+): string[] {
+  const out: string[] = [];
+  const visit = (s: unknown, e: unknown, path: string): void => {
+    if (typeof s === "string") {
+      if (!isProtected?.(path) && needsTranslation(e, overwrite)) out.push(s);
+    } else if (Array.isArray(s)) {
+      s.forEach((v, i) => visit(v, Array.isArray(e) ? e[i] : undefined, `${path}[${i}]`));
+    } else if (isObj(s)) {
+      for (const k of Object.keys(s)) visit(s[k], isObj(e) ? e[k] : undefined, path ? `${path}.${k}` : k);
+    }
+  };
+  visit(source, existing, "");
   return out;
 }
 
 /**
  * Builds the target document: source structure and key order, existing
  * translations kept (unless overwrite), new strings from `translate`, and keys
- * that only exist in the target preserved at the end.
+ * that only exist in the target preserved at the end. A string at a protected
+ * path (see keyPathProtect) is always copied from the source verbatim.
  */
 export function buildTarget(
   source: unknown,
   existing: unknown,
   translate: (s: string) => string,
   overwrite: boolean,
+  isProtected?: (path: string) => boolean,
 ): unknown {
-  if (typeof source === "string") {
-    return needsTranslation(existing, overwrite) ? translate(source) : existing;
-  }
-  if (Array.isArray(source)) {
-    return source.map((v, i) => buildTarget(v, Array.isArray(existing) ? existing[i] : undefined, translate, overwrite));
-  }
-  if (isObj(source)) {
-    const out = newObj();
-    for (const k of Object.keys(source)) {
-      out[k] = buildTarget(source[k], isObj(existing) ? existing[k] : undefined, translate, overwrite);
+  const visit = (s: unknown, e: unknown, path: string): unknown => {
+    if (typeof s === "string") {
+      if (isProtected?.(path)) return s;
+      return needsTranslation(e, overwrite) ? translate(s) : e;
     }
-    if (isObj(existing)) for (const k of Object.keys(existing)) if (!(k in out)) out[k] = existing[k];
-    return out;
-  }
-  return source;
+    if (Array.isArray(s)) return s.map((v, i) => visit(v, Array.isArray(e) ? e[i] : undefined, `${path}[${i}]`));
+    if (isObj(s)) {
+      const out = newObj();
+      for (const k of Object.keys(s)) out[k] = visit(s[k], isObj(e) ? e[k] : undefined, path ? `${path}.${k}` : k);
+      if (isObj(e)) for (const k of Object.keys(e)) if (!(k in out)) out[k] = e[k];
+      return out;
+    }
+    return s;
+  };
+  return visit(source, existing, "");
 }
 
 const CATEGORIES = ["zero", "one", "two", "few", "many", "other"];
 const PLURAL_KEY = /^(.+?)(_ordinal)?_(zero|one|two|few|many|other)$/;
+
+/**
+ * Source strings at a cardinal i18next "_one" plural key ("itemCount_one": "{{count}}
+ * item"). These are grammatically singular in English, but the model sometimes infers
+ * the TARGET's plural form anyway because {{count}} reads as an opaque marker rather
+ * than a concrete number — the engine uses this set to retranslate with a real "1" in
+ * place of {{count}} and recover the correct grammatical number (see engine.ts).
+ */
+export function pluralOneStrings(data: unknown, out: Set<string> = new Set()): Set<string> {
+  const visit = (v: unknown): void => {
+    if (Array.isArray(v)) {
+      v.forEach(visit);
+      return;
+    }
+    if (!isObj(v)) return;
+    for (const k of Object.keys(v)) {
+      const m = PLURAL_KEY.exec(k);
+      if (m && !m[2] && m[3] === "one" && typeof v[k] === "string") out.add(v[k] as string);
+      visit(v[k]);
+    }
+  };
+  visit(data);
+  return out;
+}
 
 /**
  * i18next stores plurals as `key_one` / `key_other`. Languages such as Arabic,
