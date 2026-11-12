@@ -1,5 +1,11 @@
 # locale-ai
 
+[![npm version](https://img.shields.io/npm/v/locale-ai.svg)](https://www.npmjs.com/package/locale-ai)
+[![npm downloads](https://img.shields.io/npm/dm/locale-ai.svg)](https://www.npmjs.com/package/locale-ai)
+[![CI](https://github.com/khabouss/locale-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/khabouss/locale-ai/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/locale-ai.svg)](LICENSE)
+[![node](https://img.shields.io/node/v/locale-ai.svg)](package.json)
+
 Translate your i18n JSON locale files **locally, on CPU, for free**. No API keys, no Python, nothing leaves your machine.
 
 ```bash
@@ -26,6 +32,15 @@ Download 346 MB? (Y/n)
 - **i18next plurals**: adds the forms the target language needs (`_few`, `_many` for Arabic, Russian, Polish...).
 - **Incremental**: only missing keys are translated, existing translations are kept, re-runs are no-ops. `--overwrite` re-translates everything.
 - **Structure**: key order, numbers, booleans, arrays, indentation and trailing newline are preserved.
+
+## Why locale-ai?
+
+- **No API keys, no cloud bill.** Google/DeepL/OpenAI-based translation tools work well but mean an account, a key, a per-character cost, and your strings leaving your machine. locale-ai runs the model on your own CPU.
+- **Built for i18n files, not plain text.** General MT tools translate strings; they don't know that `{count}`, `<0>bold</0>`, or `$t(common.footer.tagline)` must survive untouched. locale-ai is built around i18next/ICU conventions specifically, so placeholders, plurals, and nested references come out intact instead of mangled or dropped.
+- **Incremental by default.** Add one new key to `en.json` and only that key gets translated — existing translations in `fr.json`/`es.json`/etc. are left alone, so re-runs are cheap and safe to automate in CI.
+- **Honest about quality.** The [Languages](#languages) section tells you which pairs are review-light vs. which need a human pass, instead of presenting every language as equally production-ready.
+
+**When *not* to use it**: if you need professional/legal-grade translation, or languages outside the [supported list](#languages), use a human translator or a larger cloud model instead — locale-ai is built for keeping UI strings in sync across languages during development, with a review pass before shipping.
 
 ## Commands
 
