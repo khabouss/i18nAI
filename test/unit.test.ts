@@ -7,7 +7,7 @@ import { reachableTargets, resolveRoute } from "../src/catalog.ts";
 import { translateStrings } from "../src/engine.ts";
 import { extractIcu } from "../src/icu.ts";
 import { parseLocale } from "../src/lang.ts";
-import { addPluralForms, buildTarget, detectLayout, pendingStrings, sourceFiles, targetFile } from "../src/locales.ts";
+import { addPluralForms, buildTarget, detectLayout, pendingStrings, readLocaleDoc, sourceFiles, targetFile } from "../src/locales.ts";
 import type { Translator } from "../src/models.ts";
 import { hasTranslatableText, mask, unmask } from "../src/placeholders.ts";
 import { splitSentences } from "../src/segment.ts";
@@ -155,6 +155,37 @@ test("detects dir and file layouts", () => {
   const f = detectLayout(root, "en", "messages");
   assert.equal(targetFile(f, "en", "de", sourceFiles(f, "en")[0]), path.join(root, "messages/de.json"));
   assert.throws(() => detectLayout(root, "xx"));
+});
+
+test("YAML locale files: dir layout (mixed with JSON), file layout, and round-trip style", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-yaml-"));
+  fs.mkdirSync(path.join(root, "locales/en"), { recursive: true });
+  fs.writeFileSync(path.join(root, "locales/en/common.json"), "{}");
+  fs.writeFileSync(path.join(root, "locales/en/auth.yaml"), "login:\n  submit: Sign in\n");
+
+  const l = detectLayout(root, "en");
+  assert.equal(l.kind, "dir");
+  const files = sourceFiles(l, "en");
+  assert.deepEqual(
+    files.map((f) => path.basename(f)).sort(),
+    ["auth.yaml", "common.json"],
+  );
+  const yamlSrc = files.find((f) => f.endsWith(".yaml"))!;
+  assert.equal(targetFile(l, "en", "fr", yamlSrc), path.join(root, "locales/fr/auth.yaml"));
+
+  const doc = readLocaleDoc(yamlSrc);
+  assert.deepEqual(doc.data, { login: { submit: "Sign in" } });
+  // Unchanged data re-serializes to the same text (indent and trailing newline preserved).
+  assert.equal(doc.serialize(doc.data), "login:\n  submit: Sign in\n");
+  // An edited value keeps the same style.
+  assert.equal(doc.serialize({ login: { submit: "Se connecter" } }), "login:\n  submit: Se connecter\n");
+
+  // File layout: <root>/en.yaml -> <root>/fr.yaml, not .json.
+  const fileRoot = fs.mkdtempSync(path.join(os.tmpdir(), "lai-yaml-file-"));
+  fs.writeFileSync(path.join(fileRoot, "en.yml"), "greeting: Hello\n");
+  const fl = detectLayout(fileRoot, "en");
+  assert.equal(fl.kind, "file");
+  assert.equal(targetFile(fl, "en", "fr", sourceFiles(fl, "en")[0]), path.join(fileRoot, "fr.yml"));
 });
 
 /** A fake model: uppercases words, keeps tokens, optionally drops one. */

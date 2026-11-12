@@ -22,10 +22,10 @@ import {
   buildTarget,
   detectLayout,
   pendingStrings,
-  readJson,
+  readLocaleDoc,
   sourceFiles,
   targetFile,
-  type JsonDoc,
+  type LocaleDoc,
 } from "./locales.ts";
 import {
   cacheRoot,
@@ -45,7 +45,7 @@ const VERSION: string = JSON.parse(
   fs.readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
 ).version;
 
-const HELP = `locale-ai ${VERSION} — translate i18n JSON locale files locally, on CPU, for free.
+const HELP = `locale-ai ${VERSION} — translate i18n JSON/YAML locale files locally, on CPU, for free.
 
 Usage:
   locale-ai translate --to <locales> [options]
@@ -59,7 +59,7 @@ Usage:
 Translate options:
   --from <locale>       Source locale (default: en)
   --to <locales>        Target locale(s), comma separated: fr,es,pt-BR
-  --input <dir>         Folder containing <from>/ or <from>.json (auto-detected)
+  --input <dir>         Folder containing <from>/ or <from>.json/.yaml/.yml (auto-detected)
   --overwrite           Re-translate strings that already have a translation
   --dry-run             Show what would be translated without downloading or writing
   --fast                Greedy decoding: ~2x faster, slightly lower quality
@@ -124,7 +124,7 @@ async function ensureInstalled(models: ModelEntry[], yes: boolean): Promise<void
 interface FileJob {
   source: string;
   target: string;
-  doc: JsonDoc;
+  doc: LocaleDoc;
   existing: unknown;
   pending: string[];
 }
@@ -167,7 +167,7 @@ async function cmdTranslate(argv: string[]): Promise<number> {
   const catalog = catalogFor(config);
   const protect = protectRegex(config);
   const layout = detectLayout(process.cwd(), from.tag, values.input);
-  const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readJson(f) }));
+  const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f) }));
   log(`locale-ai ${VERSION}`);
   log(
     `Found ${sources.length} ${from.tag} file${sources.length === 1 ? "" : "s"} in ${rel(layout.root)}/` +
@@ -187,7 +187,7 @@ async function cmdTranslate(argv: string[]): Promise<number> {
     }
     const files = sources.map(({ file, doc }): FileJob => {
       const target = targetFile(layout, from.tag, locale.tag, file);
-      const existing = fs.existsSync(target) ? readJson(target).data : undefined;
+      const existing = fs.existsSync(target) ? readLocaleDoc(target).data : undefined;
       return { source: file, target, doc, existing, pending: pendingStrings(doc.data, existing, values.overwrite!) };
     });
     const unique = new Set(files.flatMap((f) => f.pending)).size;
@@ -256,7 +256,7 @@ async function cmdTranslate(argv: string[]): Promise<number> {
       const built = buildTarget(f.doc.data, f.existing, (s) => translations.get(s) ?? s, values.overwrite!);
       const { doc, added } = addPluralForms(built, intlCode(job.locale));
       pluralsAdded += added;
-      const text = JSON.stringify(doc, null, f.doc.indent) + (f.doc.finalNewline ? "\n" : "");
+      const text = f.doc.serialize(doc);
       const before = fs.existsSync(f.target) ? fs.readFileSync(f.target, "utf8") : undefined;
       if (text !== before) {
         fs.mkdirSync(path.dirname(f.target), { recursive: true });

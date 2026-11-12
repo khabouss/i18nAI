@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { parse as parseYaml } from "yaml";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const cli = path.join(here, "../src/cli.ts");
@@ -22,6 +23,8 @@ test("translates the fixture app to French", { skip: !process.env.LOCALE_AI_E2E,
   const fr = JSON.parse(fs.readFileSync(path.join(dir, "locales/fr/common.json"), "utf8"));
   const auth = JSON.parse(fs.readFileSync(path.join(dir, "locales/fr/auth.json"), "utf8"));
   const dash = JSON.parse(fs.readFileSync(path.join(dir, "locales/fr/dashboard.json"), "utf8"));
+  const settingsText = fs.readFileSync(path.join(dir, "locales/fr/settings.yaml"), "utf8");
+  const settings = parseYaml(settingsText);
 
   // Structure and non-strings preserved.
   assert.equal(dash.limit, 25);
@@ -45,8 +48,17 @@ test("translates the fixture app to French", { skip: !process.env.LOCALE_AI_E2E,
   // French plural form added for i18next.
   assert.ok("item_many" in fr);
 
-  // A second run is a no-op.
-  const before = fs.readFileSync(path.join(dir, "locales/fr/common.json"), "utf8");
+  // YAML locale files are translated too, with structure, style, and plurals preserved.
+  assert.equal(settings.seatsLeft, 10);
+  assert.ok(settings.title && settings.title !== "Settings");
+  assert.match(settings.member_one, /\{\{count\}\}/);
+  assert.ok("member_many" in settings);
+  assert.ok(settingsText.startsWith("title:"), "stays YAML, not reformatted as JSON");
+
+  // A second run is a no-op, for JSON and YAML alike.
+  const beforeJson = fs.readFileSync(path.join(dir, "locales/fr/common.json"), "utf8");
+  const beforeYaml = fs.readFileSync(path.join(dir, "locales/fr/settings.yaml"), "utf8");
   run();
-  assert.equal(fs.readFileSync(path.join(dir, "locales/fr/common.json"), "utf8"), before);
+  assert.equal(fs.readFileSync(path.join(dir, "locales/fr/common.json"), "utf8"), beforeJson);
+  assert.equal(fs.readFileSync(path.join(dir, "locales/fr/settings.yaml"), "utf8"), beforeYaml);
 });

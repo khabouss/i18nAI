@@ -1,15 +1,22 @@
 import fs from "node:fs";
 import path from "node:path";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 /**
  * Supported layouts:
  *   dir:  <root>/en/common.json, <root>/en/auth/login.json  ->  <root>/fr/...
  *   file: <root>/en.json                                    ->  <root>/fr.json
+ *
+ * Both layouts accept ".json", ".yaml" or ".yml" files, independently per file.
  */
 export interface Layout {
   kind: "dir" | "file";
   root: string;
+  /** For kind "file": the source file's extension (".json", ".yaml" or ".yml"). */
+  ext?: string;
 }
+
+const EXTENSIONS = [".json", ".yaml", ".yml"];
 
 const CANDIDATES = [
   "locales",
@@ -37,10 +44,16 @@ const CANDIDATES = [
 const isDir = (p: string) => fs.existsSync(p) && fs.statSync(p).isDirectory();
 const isFile = (p: string) => fs.existsSync(p) && fs.statSync(p).isFile();
 
+/** The source-locale file's extension, if `<root>/<from><ext>` exists for one of EXTENSIONS. */
+function fileExtAt(root: string, from: string): string | undefined {
+  return EXTENSIONS.find((ext) => isFile(path.join(root, `${from}${ext}`)));
+}
+
 function layoutAt(root: string, from: string): Layout | undefined {
   const dir = path.join(root, from);
-  if (isDir(dir) && listJson(dir).length > 0) return { kind: "dir", root };
-  if (isFile(path.join(root, `${from}.json`))) return { kind: "file", root };
+  if (isDir(dir) && listLocaleFiles(dir).length > 0) return { kind: "dir", root };
+  const ext = fileExtAt(root, from);
+  if (ext) return { kind: "file", root, ext };
   return undefined;
 }
 
@@ -49,9 +62,11 @@ export function detectLayout(cwd: string, from: string, input?: string): Layout 
     const abs = path.resolve(cwd, input);
     // Accept pointing at the source locale itself: --input locales/en or locales/en.json
     if (path.basename(abs) === from && isDir(abs)) return { kind: "dir", root: path.dirname(abs) };
-    if (path.basename(abs) === `${from}.json` && isFile(abs)) return { kind: "file", root: path.dirname(abs) };
+    const base = path.basename(abs);
+    const directExt = EXTENSIONS.find((ext) => base === `${from}${ext}`);
+    if (directExt && isFile(abs)) return { kind: "file", root: path.dirname(abs), ext: directExt };
     const l = layoutAt(abs, from);
-    if (!l) throw new Error(`No "${from}" locale found in ${input} (looked for ${from}/*.json and ${from}.json).`);
+    if (!l) throw new Error(`No "${from}" locale found in ${input} (looked for ${from}/*.json and ${from}.json/.yaml/.yml).`);
     return l;
   }
   for (const c of CANDIDATES) {
@@ -59,38 +74,41 @@ export function detectLayout(cwd: string, from: string, input?: string): Layout 
     if (l) return l;
   }
   throw new Error(
-    `Could not find "${from}" locale files. Use --input <dir> to point at the folder containing ${from}/ or ${from}.json.`,
+    `Could not find "${from}" locale files. Use --input <dir> to point at the folder containing ${from}/ or ${from}.json/.yaml/.yml.`,
   );
 }
 
-function listJson(dir: string): string[] {
+function listLocaleFiles(dir: string): string[] {
   const out: string[] = [];
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     if (e.name.startsWith(".") || e.name === "node_modules") continue;
     const p = path.join(dir, e.name);
-    if (e.isDirectory()) out.push(...listJson(p));
-    else if (e.isFile() && e.name.endsWith(".json")) out.push(p);
+    if (e.isDirectory()) out.push(...listLocaleFiles(p));
+    else if (e.isFile() && EXTENSIONS.includes(path.extname(e.name).toLowerCase())) out.push(p);
   }
   return out.sort();
 }
 
 export function sourceFiles(layout: Layout, from: string): string[] {
-  return layout.kind === "dir" ? listJson(path.join(layout.root, from)) : [path.join(layout.root, `${from}.json`)];
+  return layout.kind === "dir" ? listLocaleFiles(path.join(layout.root, from)) : [path.join(layout.root, `${from}${layout.ext}`)];
 }
 
 export function targetFile(layout: Layout, from: string, to: string, src: string): string {
-  if (layout.kind === "file") return path.join(layout.root, `${to}.json`);
+  if (layout.kind === "file") return path.join(layout.root, `${to}${layout.ext}`);
   return path.join(layout.root, to, path.relative(path.join(layout.root, from), src));
 }
 
-export interface JsonDoc {
+/** A parsed locale file plus enough of its original style to re-render an edited copy the same way. */
+export interface LocaleDoc {
   data: unknown;
-  indent: string | number;
-  finalNewline: boolean;
+  /** Renders `data` (the built target, or the unchanged source) in this file's format and style. */
+  serialize(data: unknown): string;
 }
 
-export function readJson(file: string): JsonDoc {
-  const text = fs.readFileSync(file, "utf8").replace(/^﻿/, "");
+const finalNewline = (text: string) => text === "" || text.endsWith("\n");
+const withNewline = (text: string, keep: boolean) => text.replace(/\n*$/, keep ? "\n" : "");
+
+function readJsonDoc(file: string, text: string): LocaleDoc {
   let data: unknown;
   try {
     data = JSON.parse(text);
@@ -98,15 +116,25 @@ export function readJson(file: string): JsonDoc {
     throw new Error(`Invalid JSON in ${file}: ${(e as Error).message}`);
   }
   const indent = /^[{[]\r?\n([ \t]+)/.exec(text)?.[1] ?? (text.includes("\n") ? 2 : 0);
-  return { data, indent, finalNewline: text.endsWith("\n") };
+  const keepNewline = finalNewline(text);
+  return { data, serialize: (d) => withNewline(JSON.stringify(d, null, indent), keepNewline) };
 }
 
-export function writeJson(file: string, data: unknown, style: Pick<JsonDoc, "indent" | "finalNewline">): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const text = JSON.stringify(data, null, style.indent) + (style.finalNewline ? "\n" : "");
-  const tmp = `${file}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, text);
-  fs.renameSync(tmp, file);
+function readYamlDoc(file: string, text: string): LocaleDoc {
+  let data: unknown;
+  try {
+    data = parseYaml(text) ?? {};
+  } catch (e) {
+    throw new Error(`Invalid YAML in ${file}: ${(e as Error).message}`);
+  }
+  const indent = Number(/\n( +)\S/.exec(text)?.[1].length) || 2;
+  const keepNewline = finalNewline(text);
+  return { data, serialize: (d) => withNewline(stringifyYaml(d, { indent }), keepNewline) };
+}
+
+export function readLocaleDoc(file: string): LocaleDoc {
+  const text = fs.readFileSync(file, "utf8").replace(/^﻿/, "");
+  return /\.ya?ml$/i.test(file) ? readYamlDoc(file, text) : readJsonDoc(file, text);
 }
 
 type Obj = Record<string, unknown>;

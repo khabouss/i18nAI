@@ -1,0 +1,11 @@
+title: Settings
+notifications:
+  email: Email notifications
+  push: Push notifications
+account:
+  deleteWarning: This will permanently delete your account and all of its data.
+  deleteButton: Delete account
+member_one: "{{count}} member"
+member_other: "{{count}} members"
+plan: Pro plan
+seatsLeft: 10

@@ -45,7 +45,8 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "onnxruntime-node": "^1.30.0"
+    "onnxruntime-node": "^1.30.0",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
