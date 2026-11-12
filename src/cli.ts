@@ -82,16 +82,52 @@ const endStatus = () => {
 const mb = (bytes: number) => `${Math.round(bytes / 1e6)} MB`;
 const rel = (p: string) => path.relative(process.cwd(), p) || ".";
 
+/**
+ * `Number("abc")` is NaN, and NaN silently poisons everything downstream (an
+ * all-garbage translation batch, or a raw ONNX crash deep in the model) instead of
+ * a clear error at the CLI boundary where the bad flag value actually came from.
+ */
+function positiveInt(raw: string | undefined, flag: string, fallback?: number): number {
+  if (raw === undefined) {
+    if (fallback === undefined) throw new Error(`Missing --${flag}.`);
+    return fallback;
+  }
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`Invalid --${flag} "${raw}": expected a positive integer.`);
+  return n;
+}
+
 function bar(done: number, total: number, width = 24): string {
   const ratio = total ? Math.min(1, done / total) : 1;
   const filled = Math.round(ratio * width);
   return `[${"█".repeat(filled)}${"░".repeat(width - filled)}] ${Math.round(ratio * 100)}%`;
 }
 
+/**
+ * A long download or translation batch can run for a minute or more. The `\r`-redrawn
+ * bar only ever reaches a real terminal, so a non-TTY run (CI logs, piped output) would
+ * otherwise print nothing at all between the start and the final result, indistinguishable
+ * from a hang. This prints one plain line per 10% there instead.
+ */
+function makeProgress(render: (done: number, total: number) => string): (done: number, total: number) => void {
+  let lastPct = -1;
+  return (done, total) => {
+    if (isTTY) {
+      status(render(done, total));
+      return;
+    }
+    const pct = total ? Math.floor((done / total) * 100) : 100;
+    if (pct >= lastPct + 10 || (done >= total && lastPct < 100)) {
+      lastPct = done >= total ? 100 : pct;
+      log(render(done, total));
+    }
+  };
+}
+
 async function confirm(question: string, yes: boolean): Promise<boolean> {
   if (yes) return true;
   if (!process.stdin.isTTY) {
-    throw new Error(`${question.trim()} Re-run with --yes to allow downloads in non-interactive mode.`);
+    throw new Error(`Cannot ask "${question.trim()}" in a non-interactive shell. Re-run with --yes to allow downloads.`);
   }
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   const answer = (await rl.question(`${question} (Y/n) `)).trim().toLowerCase();
@@ -115,7 +151,7 @@ async function ensureInstalled(models: ModelEntry[], yes: boolean): Promise<void
   for (const p of plans) log(`  ${p.model.id.padEnd(12)} ${mb(p.bytes).padStart(7)}  ${p.model.repo ?? p.model.path}`);
   if (!(await confirm(`Download ${mb(total)}?`, yes))) throw new Error("Download declined.");
   for (const p of plans) {
-    await install(p, (d, t) => status(`Downloading ${p.model.id} ${bar(d, t)} ${mb(d)}/${mb(t)}`));
+    await install(p, makeProgress((d, t) => `Downloading ${p.model.id} ${bar(d, t)} ${mb(d)}/${mb(t)}`));
     endStatus();
     log(`✓ Installed ${p.model.id}`);
   }
@@ -150,24 +186,20 @@ async function cmdTranslate(argv: string[]): Promise<number> {
       beams: { type: "string" },
       report: { type: "string" },
       config: { type: "string" },
-      out: { type: "string" },
-      source: { type: "string" },
-      target: { type: "string" },
-      python: { type: "string" },
       yes: { type: "boolean", short: "y", default: false },
     },
   });
   if (!values.to) throw new Error("Missing --to. Example: locale-ai translate --from en --to fr,es");
   const from = parseLocale(values.from!);
   const targets = values.to.split(",").map((t) => t.trim()).filter(Boolean).map(parseLocale);
-  const batchSize = Math.max(1, Number(values["batch-size"]));
-  const beams = Math.max(1, Number(values.beams ?? (values.fast ? 1 : 4)));
+  const batchSize = positiveInt(values["batch-size"], "batch-size");
+  const beams = positiveInt(values.beams, "beams", values.fast ? 1 : 4);
 
   const config = loadConfig(process.cwd(), values.config);
   const catalog = catalogFor(config);
   const protect = protectRegex(config);
   const layout = detectLayout(process.cwd(), from.tag, values.input);
-  const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f) }));
+  const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag) }));
   log(`locale-ai ${VERSION}`);
   log(
     `Found ${sources.length} ${from.tag} file${sources.length === 1 ? "" : "s"} in ${rel(layout.root)}/` +
@@ -187,7 +219,7 @@ async function cmdTranslate(argv: string[]): Promise<number> {
     }
     const files = sources.map(({ file, doc }): FileJob => {
       const target = targetFile(layout, from.tag, locale.tag, file);
-      const existing = fs.existsSync(target) ? readLocaleDoc(target).data : undefined;
+      const existing = fs.existsSync(target) ? readLocaleDoc(target, locale.tag).data : undefined;
       return { source: file, target, doc, existing, pending: pendingStrings(doc.data, existing, values.overwrite!) };
     });
     const unique = new Set(files.flatMap((f) => f.pending)).size;
@@ -236,7 +268,7 @@ async function cmdTranslate(argv: string[]): Promise<number> {
         batchSize,
         protect,
         lookup: glossaryLookup(from, job.locale, config),
-        onProgress: (d, t) => status(`${job.locale.tag}: translating ${bar(d, t)} ${d}/${t}`),
+        onProgress: makeProgress((d, t) => `${job.locale.tag}: translating ${bar(d, t)} ${d}/${t}`),
       });
       endStatus();
       translations = result.translations;
@@ -256,8 +288,8 @@ async function cmdTranslate(argv: string[]): Promise<number> {
       const built = buildTarget(f.doc.data, f.existing, (s) => translations.get(s) ?? s, values.overwrite!);
       const { doc, added } = addPluralForms(built, intlCode(job.locale));
       pluralsAdded += added;
-      const text = f.doc.serialize(doc, job.locale.tag);
       const before = fs.existsSync(f.target) ? fs.readFileSync(f.target, "utf8") : undefined;
+      const text = f.doc.serialize(doc, job.locale.tag, before);
       if (text !== before) {
         fs.mkdirSync(path.dirname(f.target), { recursive: true });
         fs.writeFileSync(f.target, text);

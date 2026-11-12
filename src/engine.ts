@@ -207,17 +207,34 @@ async function attempt(
     }
     let ok = true;
     const found: Issue[] = [];
-    const joined = pieces
-      .map((p) => {
+    const parts = await Promise.all(
+      pieces.map(async (p) => {
         // No spaces between sentences in Chinese, Japanese, Thai...
         if (!p.translate) return NO_SPACES.test(opts.targetLang) ? p.value.replace(/^[ \t]+$/, "") : p.value;
-        const out = results.get(prepare(p.value)) ?? "";
-        if (isDegenerate(p.value, out)) ok = false;
-        else if (out.length > 3 * p.value.length + 20) found.push({ source: unit.owner, kind: "suspicious-length", output: out });
-        else if (/(\b\p{L}+\b)(?:\W+\1\b){3,}/u.test(out)) found.push({ source: unit.owner, kind: "repetition", output: out });
+        let out = results.get(prepare(p.value)) ?? "";
+        const suspicionKind = (o: string): IssueKind | undefined =>
+          o.length > 3 * p.value.length + 20 ? "suspicious-length" : /(\b\p{L}+\b)(?:\W+\1\b){3,}/u.test(o) ? "repetition" : undefined;
+        let degenerate = isDegenerate(p.value, out);
+        let kind = degenerate ? undefined : suspicionKind(out);
+        // Quantizing a batched tensor computes scale factors from the whole batch, so one
+        // row's output can depend on what else shared its batch. Retrying the same input
+        // alone (batch of 1) often clears a hallucination that batch composition caused.
+        if (degenerate || kind !== undefined) {
+          const retry = await runModels(new Set([prepare(p.value)]), hops, opts, progress);
+          const retryOut = retry.get(prepare(p.value)) ?? out;
+          const retryDegenerate = isDegenerate(p.value, retryOut);
+          if (!retryDegenerate && suspicionKind(retryOut) === undefined) {
+            out = retryOut;
+            degenerate = false;
+            kind = undefined;
+          }
+        }
+        if (degenerate) ok = false;
+        else if (kind) found.push({ source: unit.owner, kind, output: out });
         return postprocess(p.value, out, opts.targetLang);
-      })
-      .join("");
+      }),
+    );
+    const joined = parts.join("");
     const restored = ok ? unmask(joined, masked) : undefined;
     if (restored === undefined) failed.push(unit);
     else {

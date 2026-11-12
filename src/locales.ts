@@ -107,8 +107,11 @@ export interface LocaleDoc {
    * and style. `targetTag` is the locale being written (e.g. "fr", "pt-BR"); formats
    * that carry their own locale metadata (ARB's "@@locale", a .po header's "Language:")
    * use it to fix that metadata up. Formats without such metadata ignore it.
+   * `existingText`, when the target file already exists, is its current raw content —
+   * formats whose metadata can be hand-edited by a translator (a .po header's
+   * `Plural-Forms`) check it first so a rerun doesn't silently revert that edit.
    */
-  serialize(data: unknown, targetTag: string): string;
+  serialize(data: unknown, targetTag: string, existingText?: string): string;
 }
 
 const finalNewline = (text: string) => text === "" || text.endsWith("\n");
@@ -126,16 +129,28 @@ function readJsonDoc(file: string, text: string): LocaleDoc {
   return { data, serialize: (d) => withNewline(JSON.stringify(d, null, indent), keepNewline) };
 }
 
-function readYamlDoc(file: string, text: string): LocaleDoc {
-  let data: unknown;
+/**
+ * Rails and some other frameworks nest an entire YAML locale file under a single
+ * top-level key matching the locale tag itself (`en:\n  hello: Hi`), so the file is
+ * valid wherever it's loaded from. Detect that wrapper and unwrap it before handing
+ * `data` to the rest of the pipeline (which otherwise treats "en" as just another
+ * translatable key), then re-wrap under the target's own tag on serialize.
+ */
+function readYamlDoc(file: string, text: string, tag: string): LocaleDoc {
+  let raw: unknown;
   try {
-    data = parseYaml(text) ?? {};
+    raw = parseYaml(text) ?? {};
   } catch (e) {
     throw new Error(`Invalid YAML in ${file}: ${(e as Error).message}`);
   }
   const indent = Number(/\n( +)\S/.exec(text)?.[1].length) || 2;
   const keepNewline = finalNewline(text);
-  return { data, serialize: (d) => withNewline(stringifyYaml(d, { indent }), keepNewline) };
+  const keys = isObj(raw) ? Object.keys(raw) : [];
+  const wrapped = keys.length === 1 && keys[0] === tag;
+  const data = wrapped ? (raw as Obj)[tag] : raw;
+  const serialize = (d: unknown, targetTag: string): string =>
+    withNewline(stringifyYaml(wrapped ? { [targetTag]: d } : d, { indent }), keepNewline);
+  return { data, serialize };
 }
 
 /** Apple .strings: `"key" = "value";`, optionally preceded by a `/* ... *\/` comment. */
@@ -149,7 +164,9 @@ function escapeC(s: string): string {
 }
 
 function readStringsDoc(file: string, text: string): LocaleDoc {
-  const PAIR = /(?:(\/\*[\s\S]*?\*\/)[ \t]*\r?\n+)?[ \t]*"((?:\\.|[^"\\])*)"\s*=\s*"((?:\\.|[^"\\])*)"\s*;/g;
+  // A key's preceding comment is either a /* ... */ block, or one or more consecutive // lines.
+  const PAIR =
+    /(?:((?:\/\*[\s\S]*?\*\/)|(?:\/\/[^\r\n]*(?:\r?\n[ \t]*\/\/[^\r\n]*)*))[ \t]*\r?\n+)?[ \t]*"((?:\\.|[^"\\])*)"\s*=\s*"((?:\\.|[^"\\])*)"\s*;/g;
   const data = newObj();
   const entries: Array<{ key: string; comment?: string }> = [];
   for (const m of text.matchAll(PAIR)) {
@@ -223,6 +240,52 @@ interface PoEntry {
 }
 const poKey = (e: { msgctxt?: string; msgid: string }) => (e.msgctxt ?? "") + "\u0004" + e.msgid;
 
+/**
+ * gettext's well-established Plural-Forms formulas, keyed by language. Copying the
+ * source header's line verbatim (as a naive patch does) is wrong whenever the target
+ * needs a different count — Arabic needs 6 categories, an English source's line says
+ * 2, and anything consuming the .po indexes msgstr[] short or drops forms silently.
+ */
+const PLURAL_FORMS: Record<string, string> = {
+  ja: "nplurals=1; plural=0;",
+  zh: "nplurals=1; plural=0;",
+  ko: "nplurals=1; plural=0;",
+  th: "nplurals=1; plural=0;",
+  vi: "nplurals=1; plural=0;",
+  id: "nplurals=1; plural=0;",
+  ms: "nplurals=1; plural=0;",
+  fr: "nplurals=2; plural=(n > 1);",
+  pt: "nplurals=2; plural=(n != 1);",
+  cs: "nplurals=3; plural=(n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2;",
+  sk: "nplurals=3; plural=(n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2;",
+  pl: "nplurals=3; plural=(n==1 ? 0 : n%10>=2 && n%10<=4 && (n%100<12 || n%100>14) ? 1 : 2);",
+  ru: "nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<12 || n%100>14) ? 1 : 2);",
+  uk: "nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<12 || n%100>14) ? 1 : 2);",
+  ro: "nplurals=3; plural=(n==1 ? 0 : (n==0 || (n%100 > 0 && n%100 < 20)) ? 1 : 2);",
+  ar: "nplurals=6; plural=(n==0 ? 0 : n==1 ? 1 : n==2 ? 2 : n%100>=3 && n%100<=10 ? 3 : n%100>=11 && n%100<=99 ? 4 : 5);",
+};
+
+/**
+ * Falls back to CLDR's plural category count (via Intl.PluralRules) for a language
+ * not in the table above: not necessarily linguistically exact (it buckets purely by
+ * small integer value), but it keeps nplurals correct, which is the part that breaks
+ * gettext consumers when wrong.
+ */
+function pluralFormsHeader(lang: string): string {
+  const known = PLURAL_FORMS[lang];
+  if (known) return known;
+  let n: number;
+  try {
+    n = new Intl.PluralRules(lang).resolvedOptions().pluralCategories.length;
+  } catch {
+    n = 2;
+  }
+  if (n <= 1) return "nplurals=1; plural=0;";
+  if (n === 2) return "nplurals=2; plural=(n != 1);";
+  const branches = Array.from({ length: n - 1 }, (_, i) => `n==${i + 1} ? ${i} :`).join(" ");
+  return `nplurals=${n}; plural=(${branches} ${n - 1});`;
+}
+
 function parsePo(text: string): { entries: PoEntry[]; leading: string[] } {
   const entries: PoEntry[] = [];
   let leading: string[] = [];
@@ -292,16 +355,23 @@ function readPoDoc(file: string, text: string): LocaleDoc {
   const data = newObj();
   for (const e of entries) if (!e.isHeader && e.msgidPlural === undefined) data[poKey(e)] = e.msgstr;
   const keepNewline = finalNewline(text);
-  const serialize = (d: unknown, targetTag: string): string => {
+  const serialize = (d: unknown, targetTag: string, existingText?: string): string => {
     const obj = isObj(d) ? d : newObj();
     const seen = new Set<string>();
     const blocks: string[] = leading.length ? [leading.join("\n")] : [];
+    // A previous run may have left a header a translator then hand-fixed (a corrected
+    // Plural-Forms, an added Last-Translator, ...). Keep it as-is rather than
+    // regenerating from the source every time; only a brand-new target file gets a
+    // freshly computed header.
+    const existingHeader = existingText && parsePo(existingText).entries.find((e) => e.isHeader);
     for (const e of entries) {
       const lines = [...e.comments];
       if (e.msgctxt !== undefined) lines.push(`msgctxt "${escapeC(e.msgctxt)}"`);
       if (e.isHeader) {
         lines.push(`msgid ""`);
-        const header = e.msgstr.replace(/^Language:.*$/m, `Language: ${targetTag}`);
+        const header = existingHeader
+          ? existingHeader.msgstr
+          : e.msgstr.replace(/^Language:.*$/m, `Language: ${targetTag}`).replace(/^Plural-Forms:.*$/m, `Plural-Forms: ${pluralFormsHeader(targetTag)}`);
         lines.push(`msgstr "${escapeC(header)}"`);
       } else if (e.msgidPlural !== undefined) {
         lines.push(`msgid "${escapeC(e.msgid)}"`, `msgid_plural "${escapeC(e.msgidPlural)}"`);
@@ -328,10 +398,11 @@ function readPoDoc(file: string, text: string): LocaleDoc {
   return { data, serialize };
 }
 
-export function readLocaleDoc(file: string): LocaleDoc {
+/** `tag` is the locale this file is for (the source tag, or an existing target's own tag). */
+export function readLocaleDoc(file: string, tag: string): LocaleDoc {
   const text = fs.readFileSync(file, "utf8").replace(/^﻿/, "");
   const ext = path.extname(file).toLowerCase();
-  if (ext === ".yaml" || ext === ".yml") return readYamlDoc(file, text);
+  if (ext === ".yaml" || ext === ".yml") return readYamlDoc(file, text, tag);
   if (ext === ".po") return readPoDoc(file, text);
   if (ext === ".arb") return readArbDoc(file, text);
   if (ext === ".strings") return readStringsDoc(file, text);

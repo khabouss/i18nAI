@@ -190,12 +190,12 @@ test("YAML locale files: dir layout (mixed with JSON), file layout, and round-tr
   const yamlSrc = files.find((f) => f.endsWith(".yaml"))!;
   assert.equal(targetFile(l, "en", "fr", yamlSrc), path.join(root, "locales/fr/auth.yaml"));
 
-  const doc = readLocaleDoc(yamlSrc);
+  const doc = readLocaleDoc(yamlSrc, "en");
   assert.deepEqual(doc.data, { login: { submit: "Sign in" } });
   // Unchanged data re-serializes to the same text (indent and trailing newline preserved).
-  assert.equal(doc.serialize(doc.data), "login:\n  submit: Sign in\n");
+  assert.equal(doc.serialize(doc.data, "en"), "login:\n  submit: Sign in\n");
   // An edited value keeps the same style.
-  assert.equal(doc.serialize({ login: { submit: "Se connecter" } }), "login:\n  submit: Se connecter\n");
+  assert.equal(doc.serialize({ login: { submit: "Se connecter" } }, "fr"), "login:\n  submit: Se connecter\n");
 
   // File layout: <root>/en.yaml -> <root>/fr.yaml, not .json.
   const fileRoot = fs.mkdtempSync(path.join(os.tmpdir(), "lai-yaml-file-"));
@@ -205,16 +205,52 @@ test("YAML locale files: dir layout (mixed with JSON), file layout, and round-tr
   assert.equal(targetFile(fl, "en", "fr", sourceFiles(fl, "en")[0]), path.join(fileRoot, "fr.yml"));
 });
 
+test("Rails-style YAML: single top-level key matching the locale tag is unwrapped, and rewrapped under the target's tag", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-yaml-rails-"));
+  const file = path.join(root, "en.yml");
+  fs.writeFileSync(file, "en:\n  hello: Hello\n  greeting: Hi %{name}\n");
+
+  const doc = readLocaleDoc(file, "en");
+  assert.deepEqual(doc.data, { hello: "Hello", greeting: "Hi %{name}" });
+  assert.equal(doc.serialize(doc.data, "en"), "en:\n  hello: Hello\n  greeting: Hi %{name}\n");
+
+  const built = { hello: "Bonjour", greeting: "Bonjour %{name}" };
+  assert.equal(doc.serialize(built, "fr"), "fr:\n  hello: Bonjour\n  greeting: Bonjour %{name}\n");
+
+  // A plain (unwrapped) YAML file is untouched even if it happens to have one top-level key,
+  // as long as that key isn't the source locale's own tag.
+  const plain = path.join(root, "en2.yml");
+  fs.writeFileSync(plain, "login:\n  submit: Sign in\n");
+  const plainDoc = readLocaleDoc(plain, "en");
+  assert.deepEqual(plainDoc.data, { login: { submit: "Sign in" } });
+  assert.equal(plainDoc.serialize(plainDoc.data, "fr"), "login:\n  submit: Sign in\n");
+});
+
 test("Apple .strings: comments kept per key, round-trip style, new keys appended", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-strings-"));
   const file = path.join(root, "en.strings");
   fs.writeFileSync(file, '/* Shown on launch */\n"greeting" = "Hello, %@!";\n\n"farewell" = "Goodbye";\n');
-  const doc = readLocaleDoc(file);
+  const doc = readLocaleDoc(file, "en");
   assert.equal(JSON.stringify(doc.data), '{"greeting":"Hello, %@!","farewell":"Goodbye"}');
-  assert.equal(doc.serialize(doc.data), '/* Shown on launch */\n"greeting" = "Hello, %@!";\n\n"farewell" = "Goodbye";\n');
+  assert.equal(doc.serialize(doc.data, "en"), '/* Shown on launch */\n"greeting" = "Hello, %@!";\n\n"farewell" = "Goodbye";\n');
   assert.equal(
-    doc.serialize({ greeting: "Bonjour, %@!", farewell: "Au revoir", extra: "New" }),
+    doc.serialize({ greeting: "Bonjour, %@!", farewell: "Au revoir", extra: "New" }, "fr"),
     '/* Shown on launch */\n"greeting" = "Bonjour, %@!";\n\n"farewell" = "Au revoir";\n\n"extra" = "New";\n',
+  );
+});
+
+test("Apple .strings: // line comments (single and consecutive) are kept per key too", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-strings-linecomment-"));
+  const file = path.join(root, "en.strings");
+  fs.writeFileSync(
+    file,
+    '// Shown on launch\n"greeting" = "Hello, %@!";\n\n// Shown twice\n// when the user signs out\n"farewell" = "Goodbye";\n',
+  );
+  const doc = readLocaleDoc(file, "en");
+  assert.equal(JSON.stringify(doc.data), '{"greeting":"Hello, %@!","farewell":"Goodbye"}');
+  assert.equal(
+    doc.serialize(doc.data, "en"),
+    '// Shown on launch\n"greeting" = "Hello, %@!";\n\n// Shown twice\n// when the user signs out\n"farewell" = "Goodbye";\n',
   );
 });
 
@@ -229,7 +265,7 @@ test("ARB: @key metadata and @@locale are not translatable and are reinserted; @
       2,
     ),
   );
-  const doc = readLocaleDoc(file);
+  const doc = readLocaleDoc(file, "en");
   assert.equal(JSON.stringify(doc.data), '{"greeting":"Hello, {name}!"}');
   const built = { greeting: "Bonjour, {name}!" };
   const out = JSON.parse(doc.serialize(built, "fr"));
@@ -258,7 +294,7 @@ test("gettext .po: msgid is the stable key, plurals and the header pass through 
       "",
     ].join("\n"),
   );
-  const doc = readLocaleDoc(file);
+  const doc = readLocaleDoc(file, "en");
   assert.equal(JSON.stringify(doc.data), '{"\\u0004greeting":"Hello!"}');
   const built = { "\u0004greeting": "Bonjour!" };
   const text = doc.serialize(built, "fr");
@@ -266,6 +302,33 @@ test("gettext .po: msgid is the stable key, plurals and the header pass through 
   assert.match(text, /#: src\/app\.js:10\nmsgid "greeting"\nmsgstr "Bonjour!"/);
   // The plural entry is carried through unchanged (not part of `data`, not translated).
   assert.match(text, /msgid_plural "items_plural"\nmsgstr\[0\] "one item"\nmsgstr\[1\] "many items"/);
+});
+
+test("gettext .po: Plural-Forms is computed per target language, and a hand-fixed existing header survives a rerun", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-po-header-"));
+  const file = path.join(root, "en.po");
+  fs.writeFileSync(
+    file,
+    ['msgid ""', 'msgstr "Language: \\nPlural-Forms: nplurals=2; plural=(n != 1);\\n"', "", 'msgid "greeting"', 'msgstr "Hello!"', ""].join(
+      "\n",
+    ),
+  );
+  const doc = readLocaleDoc(file, "en");
+  const built = { "\u0004greeting": "مرحبا!" };
+
+  // Brand-new target file: Plural-Forms is computed for Arabic (6 categories), not copied from English (2).
+  const fresh = doc.serialize(built, "ar");
+  assert.match(fresh, /Language: ar/);
+  assert.match(fresh, /Plural-Forms: nplurals=6;/);
+
+  // An existing target file whose header a translator hand-fixed (e.g. a corrected
+  // Plural-Forms) keeps that header verbatim on a rerun, instead of it reverting.
+  const handFixed = ['msgid ""', 'msgstr "Language: ar\\nPlural-Forms: nplurals=6; plural=(n==0 ? 0 : 5);\\nLast-Translator: Alex\\n"', "", 'msgid "greeting"', 'msgstr "مرحبا!"', ""].join(
+    "\n",
+  );
+  const rerun = doc.serialize(built, "ar", handFixed);
+  assert.match(rerun, /Last-Translator: Alex/);
+  assert.match(rerun, /Plural-Forms: nplurals=6; plural=\(n==0 \? 0 : 5\);/);
 });
 
 /** A fake model: uppercases words, keeps tokens, optionally drops one. */
@@ -349,6 +412,29 @@ test("engine: retries a failing style with numeric markers; fallback keeps punct
     batchSize: 4,
   });
   assert.equal(r.translations.get("Hello {{name}}, you have {{n}} messages"), "Hello {{name}}, у вас {{n}} messages");
+});
+
+test("engine: a suspicious batched output is retried alone, and the clean retry is kept silently", async () => {
+  // Simulates batch-dependent quantization noise: translating "Good morning" alongside
+  // other strings in one batch hallucinates a repeating garble, but translating it
+  // alone (batch of 1) is clean.
+  const flaky: Translator = {
+    translate: async (texts) => texts.map((s) => (s === "Good morning" && texts.length > 1 ? "non non non non non" : "Bonjour")),
+    dispose: async () => {},
+  };
+  const { translations, issues } = await translateStrings(["Good morning", "Good night"], [flaky], {
+    sourceLang: "en",
+    targetLang: "fr",
+    batchSize: 4,
+  });
+  assert.equal(translations.get("Good morning"), "Bonjour");
+  assert.equal(issues.length, 0, "the retry succeeded, so nothing is reported");
+
+  // When even the solo retry is still suspicious, the (flawed) output ships and is reported.
+  const stuck: Translator = { translate: async (texts) => texts.map(() => "non non non non non"), dispose: async () => {} };
+  const r2 = await translateStrings(["Good morning"], [stuck], { sourceLang: "en", targetLang: "fr", batchSize: 4 });
+  assert.equal(r2.translations.get("Good morning"), "Non non non non non");
+  assert.ok(r2.issues.some((i) => i.kind === "repetition"));
 });
 
 test("custom models: config entries win over built-ins, prefixes per target", async () => {
