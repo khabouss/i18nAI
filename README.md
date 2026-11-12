@@ -6,7 +6,7 @@
 [![license](https://img.shields.io/npm/l/locale-ai.svg)](LICENSE)
 [![node](https://img.shields.io/node/v/locale-ai.svg)](package.json)
 
-Translate your i18n JSON/YAML locale files **locally, on CPU, for free**. No API keys, no Python, nothing leaves your machine.
+Translate your i18n locale files **locally, on CPU, for free**. No API keys, no Python, nothing leaves your machine.
 
 ```bash
 npx locale-ai translate --from en --to fr,es,de
@@ -26,12 +26,14 @@ Download 577 MB? (Y/n)
 
 ## What it handles
 
-- **Layouts**: `locales/en/*.json` (nested folders too) → `locales/fr/...`, or `messages/en.json` → `messages/fr.json`. `.json`, `.yaml` and `.yml` are all supported, mixed freely in the same project. Common folders (`locales`, `src/locales`, `public/locales`, `src/i18n`, `messages`, `lang`, ...) are found automatically, or pass `--input`.
+- **Layouts**: `locales/en/*.json` (nested folders too) → `locales/fr/...`, or `messages/en.json` → `messages/fr.json`. `.json`, `.yaml`, `.yml`, `.po` (gettext), `.arb` (Flutter) and `.strings` (Apple) are all supported, mixed freely in the same project. Common folders (`locales`, `src/locales`, `public/locales`, `src/i18n`, `messages`, `lang`, ...) are found automatically, or pass `--input`.
 - **Placeholders are never translated or lost**: `{name}`, `{{count}}`, `%s`, `%1$s`, `%(name)s`, `%{name}`, `${name}`, `:attribute`, `$t(key)`, `@:key`, `<b>…</b>`, `<0>…</0>`, `&nbsp;`, URLs, e-mails.
 - **ICU MessageFormat**: `{count, plural, one {# file} other {# files}}`, `select`, nesting. Only the text is translated.
 - **i18next plurals**: adds the forms the target language needs (`_few`, `_many` for Arabic, Russian, Polish...).
 - **Incremental**: only missing keys are translated, existing translations are kept, re-runs are no-ops. `--overwrite` re-translates everything.
 - **Structure**: key order, numbers, booleans, arrays, indentation and trailing newline are preserved.
+
+**Format notes**: for `.po`, `msgid` is the stable key (never changed) and `msgstr` is the translated value, as gettext expects — the English `.po` file's `msgstr` must hold the source text (most generators already fill it; an empty `msgstr` is treated as empty, not inherited from `msgid`), and `msgid_plural`/`msgstr[n]` plural entries pass through untranslated (translate those by hand, or use ICU plurals in `.arb`/JSON/YAML instead). For `.arb`, `@key` metadata and `@@locale` are never translated; `@@locale` is set to the target locale on output.
 
 ## Why locale-ai?
 
@@ -153,4 +155,3 @@ npm run build       # → dist/
 ## Next steps
 
 1. **More languages**: ja, ko have no usable OPUS-MT model yet; a different model family would be needed.
-2. **More formats**: `.po` (gettext), ARB (Flutter), Apple `.strings`. (JSON and YAML are supported today.)

@@ -7,16 +7,17 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
  *   dir:  <root>/en/common.json, <root>/en/auth/login.json  ->  <root>/fr/...
  *   file: <root>/en.json                                    ->  <root>/fr.json
  *
- * Both layouts accept ".json", ".yaml" or ".yml" files, independently per file.
+ * Both layouts accept ".json", ".yaml", ".yml", ".po", ".arb" or ".strings" files,
+ * independently per file.
  */
 export interface Layout {
   kind: "dir" | "file";
   root: string;
-  /** For kind "file": the source file's extension (".json", ".yaml" or ".yml"). */
+  /** For kind "file": the source file's extension (e.g. ".json", ".po"). */
   ext?: string;
 }
 
-const EXTENSIONS = [".json", ".yaml", ".yml"];
+const EXTENSIONS = [".json", ".yaml", ".yml", ".po", ".arb", ".strings"];
 
 const CANDIDATES = [
   "locales",
@@ -101,8 +102,13 @@ export function targetFile(layout: Layout, from: string, to: string, src: string
 /** A parsed locale file plus enough of its original style to re-render an edited copy the same way. */
 export interface LocaleDoc {
   data: unknown;
-  /** Renders `data` (the built target, or the unchanged source) in this file's format and style. */
-  serialize(data: unknown): string;
+  /**
+   * Renders `data` (the built target, or the unchanged source) in this file's format
+   * and style. `targetTag` is the locale being written (e.g. "fr", "pt-BR"); formats
+   * that carry their own locale metadata (ARB's "@@locale", a .po header's "Language:")
+   * use it to fix that metadata up. Formats without such metadata ignore it.
+   */
+  serialize(data: unknown, targetTag: string): string;
 }
 
 const finalNewline = (text: string) => text === "" || text.endsWith("\n");
@@ -132,9 +138,204 @@ function readYamlDoc(file: string, text: string): LocaleDoc {
   return { data, serialize: (d) => withNewline(stringifyYaml(d, { indent }), keepNewline) };
 }
 
+/** Apple .strings: `"key" = "value";`, optionally preceded by a `/* ... *\/` comment. */
+function unescapeC(s: string): string {
+  return s.replace(/\\(.)/g, (_, c: string) =>
+    ({ n: "\n", t: "\t", r: "\r", '"': '"', "\\": "\\" })[c] ?? c,
+  );
+}
+function escapeC(s: string): string {
+  return s.replace(/[\\"\n\t\r]/g, (c) => ({ "\\": "\\\\", '"': '\\"', "\n": "\\n", "\t": "\\t", "\r": "\\r" })[c]!);
+}
+
+function readStringsDoc(file: string, text: string): LocaleDoc {
+  const PAIR = /(?:(\/\*[\s\S]*?\*\/)[ \t]*\r?\n+)?[ \t]*"((?:\\.|[^"\\])*)"\s*=\s*"((?:\\.|[^"\\])*)"\s*;/g;
+  const data = newObj();
+  const entries: Array<{ key: string; comment?: string }> = [];
+  for (const m of text.matchAll(PAIR)) {
+    const key = unescapeC(m[2]);
+    data[key] = unescapeC(m[3]);
+    entries.push({ key, comment: m[1] });
+  }
+  if (entries.length === 0 && text.trim() !== "") {
+    throw new Error(`No "key" = "value"; entries found in ${file}`);
+  }
+  const keepNewline = finalNewline(text);
+  const serialize = (d: unknown): string => {
+    const obj = isObj(d) ? d : newObj();
+    const seen = new Set<string>();
+    const blocks: string[] = [];
+    for (const e of entries) {
+      seen.add(e.key);
+      const v = typeof obj[e.key] === "string" ? (obj[e.key] as string) : "";
+      blocks.push((e.comment ? e.comment + "\n" : "") + `"${escapeC(e.key)}" = "${escapeC(v)}";`);
+    }
+    for (const k of Object.keys(obj)) {
+      if (seen.has(k) || typeof obj[k] !== "string") continue;
+      blocks.push(`"${escapeC(k)}" = "${escapeC(obj[k] as string)}";`);
+    }
+    return withNewline(blocks.join("\n\n"), keepNewline);
+  };
+  return { data, serialize };
+}
+
+/** ARB (Flutter): plain JSON, but "@key" / "@@locale" entries are metadata, not translatable content. */
+function readArbDoc(file: string, text: string): LocaleDoc {
+  let raw: Obj;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`Invalid ARB (JSON) in ${file}: ${(e as Error).message}`);
+  }
+  const data = newObj();
+  for (const k of Object.keys(raw)) if (!k.startsWith("@") && typeof raw[k] === "string") data[k] = raw[k];
+  const indent = /^\{\r?\n([ \t]+)/.exec(text)?.[1] ?? (text.includes("\n") ? 2 : 0);
+  const keepNewline = finalNewline(text);
+  const hasLocale = typeof raw["@@locale"] === "string";
+  const serialize = (d: unknown, targetTag: string): string => {
+    const obj = isObj(d) ? d : newObj();
+    const out = newObj();
+    if (hasLocale) out["@@locale"] = targetTag;
+    for (const k of Object.keys(raw)) {
+      if (k === "@@locale" || k.startsWith("@")) continue;
+      out[k] = typeof obj[k] === "string" ? obj[k] : raw[k];
+      if (`@${k}` in raw) out[`@${k}`] = raw[`@${k}`];
+    }
+    for (const k of Object.keys(obj)) if (!(k in out) && !k.startsWith("@")) out[k] = obj[k];
+    return withNewline(JSON.stringify(out, null, indent), keepNewline);
+  };
+  return { data, serialize };
+}
+
+/**
+ * gettext .po: `msgid` is the stable key (kept identical across locales, as gettext
+ * requires); the translatable value is `msgstr`. Plural entries (`msgid_plural` /
+ * `msgstr[n]`) and the "" header entry are carried through unchanged (not translated).
+ */
+interface PoEntry {
+  comments: string[];
+  msgctxt?: string;
+  msgid: string;
+  msgidPlural?: string;
+  msgstrPlural?: string[];
+  msgstr: string;
+  isHeader: boolean;
+}
+const poKey = (e: { msgctxt?: string; msgid: string }) => (e.msgctxt ?? "") + "\u0004" + e.msgid;
+
+function parsePo(text: string): { entries: PoEntry[]; leading: string[] } {
+  const entries: PoEntry[] = [];
+  let leading: string[] = [];
+  let cur = { comments: [] as string[] } as Partial<PoEntry> & { comments: string[] };
+  let field: string | null = null;
+  let buf = "";
+  const flushField = () => {
+    if (field === null) return;
+    const val = unescapeC(buf);
+    if (field === "msgctxt") cur.msgctxt = val;
+    else if (field === "msgid") cur.msgid = val;
+    else if (field === "msgid_plural") cur.msgidPlural = val;
+    else if (field === "msgstr") cur.msgstr = val;
+    else (cur.msgstrPlural ??= [])[Number(field.slice(7, -1))] = val;
+    field = null;
+    buf = "";
+  };
+  const flushEntry = () => {
+    flushField();
+    if (cur.msgid !== undefined) {
+      entries.push({ comments: cur.comments, msgctxt: cur.msgctxt, msgid: cur.msgid, msgidPlural: cur.msgidPlural,
+        msgstrPlural: cur.msgstrPlural, msgstr: cur.msgstr ?? "", isHeader: cur.msgid === "" && cur.msgctxt === undefined });
+    } else if (entries.length === 0 && cur.comments.length && leading.length === 0) {
+      leading = cur.comments;
+    }
+    cur = { comments: [] };
+  };
+  for (const line of text.split(/\r?\n/)) {
+    if (line.trim() === "") {
+      flushEntry();
+      continue;
+    }
+    let m: RegExpExecArray | null;
+    if (/^#/.test(line)) {
+      flushField();
+      cur.comments.push(line);
+    } else if ((m = /^msgctxt\s+"((?:\\.|[^"\\])*)"\s*$/.exec(line))) {
+      flushField();
+      field = "msgctxt";
+      buf = m[1];
+    } else if ((m = /^msgid_plural\s+"((?:\\.|[^"\\])*)"\s*$/.exec(line))) {
+      flushField();
+      field = "msgid_plural";
+      buf = m[1];
+    } else if ((m = /^msgid\s+"((?:\\.|[^"\\])*)"\s*$/.exec(line))) {
+      flushField();
+      field = "msgid";
+      buf = m[1];
+    } else if ((m = /^msgstr\[(\d+)\]\s+"((?:\\.|[^"\\])*)"\s*$/.exec(line))) {
+      flushField();
+      field = `msgstr[${m[1]}]`;
+      buf = m[2];
+    } else if ((m = /^msgstr\s+"((?:\\.|[^"\\])*)"\s*$/.exec(line))) {
+      flushField();
+      field = "msgstr";
+      buf = m[1];
+    } else if ((m = /^"((?:\\.|[^"\\])*)"\s*$/.exec(line))) {
+      buf += m[1];
+    }
+  }
+  flushEntry();
+  return { entries, leading };
+}
+
+function readPoDoc(file: string, text: string): LocaleDoc {
+  const { entries, leading } = parsePo(text);
+  const data = newObj();
+  for (const e of entries) if (!e.isHeader && e.msgidPlural === undefined) data[poKey(e)] = e.msgstr;
+  const keepNewline = finalNewline(text);
+  const serialize = (d: unknown, targetTag: string): string => {
+    const obj = isObj(d) ? d : newObj();
+    const seen = new Set<string>();
+    const blocks: string[] = leading.length ? [leading.join("\n")] : [];
+    for (const e of entries) {
+      const lines = [...e.comments];
+      if (e.msgctxt !== undefined) lines.push(`msgctxt "${escapeC(e.msgctxt)}"`);
+      if (e.isHeader) {
+        lines.push(`msgid ""`);
+        const header = e.msgstr.replace(/^Language:.*$/m, `Language: ${targetTag}`);
+        lines.push(`msgstr "${escapeC(header)}"`);
+      } else if (e.msgidPlural !== undefined) {
+        lines.push(`msgid "${escapeC(e.msgid)}"`, `msgid_plural "${escapeC(e.msgidPlural)}"`);
+        (e.msgstrPlural ?? []).forEach((s, i) => lines.push(`msgstr[${i}] "${escapeC(s)}"`));
+      } else {
+        const key = poKey(e);
+        seen.add(key);
+        const v = typeof obj[key] === "string" ? (obj[key] as string) : "";
+        lines.push(`msgid "${escapeC(e.msgid)}"`, `msgstr "${escapeC(v)}"`);
+      }
+      blocks.push(lines.join("\n"));
+    }
+    for (const k of Object.keys(obj)) {
+      if (seen.has(k) || typeof obj[k] !== "string") continue;
+      const i = k.indexOf("\u0004");
+      const ctx = i === -1 ? undefined : k.slice(0, i);
+      const id = i === -1 ? k : k.slice(i + 1);
+      const lines = ctx ? [`msgctxt "${escapeC(ctx)}"`] : [];
+      lines.push(`msgid "${escapeC(id)}"`, `msgstr "${escapeC(obj[k] as string)}"`);
+      blocks.push(lines.join("\n"));
+    }
+    return withNewline(blocks.join("\n\n"), keepNewline);
+  };
+  return { data, serialize };
+}
+
 export function readLocaleDoc(file: string): LocaleDoc {
   const text = fs.readFileSync(file, "utf8").replace(/^﻿/, "");
-  return /\.ya?ml$/i.test(file) ? readYamlDoc(file, text) : readJsonDoc(file, text);
+  const ext = path.extname(file).toLowerCase();
+  if (ext === ".yaml" || ext === ".yml") return readYamlDoc(file, text);
+  if (ext === ".po") return readPoDoc(file, text);
+  if (ext === ".arb") return readArbDoc(file, text);
+  if (ext === ".strings") return readStringsDoc(file, text);
+  return readJsonDoc(file, text);
 }
 
 type Obj = Record<string, unknown>;

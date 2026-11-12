@@ -45,7 +45,7 @@ const VERSION: string = JSON.parse(
   fs.readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
 ).version;
 
-const HELP = `locale-ai ${VERSION} — translate i18n JSON/YAML locale files locally, on CPU, for free.
+const HELP = `locale-ai ${VERSION} — translate i18n locale files locally, on CPU, for free.
 
 Usage:
   locale-ai translate --to <locales> [options]
@@ -59,7 +59,7 @@ Usage:
 Translate options:
   --from <locale>       Source locale (default: en)
   --to <locales>        Target locale(s), comma separated: fr,es,pt-BR
-  --input <dir>         Folder containing <from>/ or <from>.json/.yaml/.yml (auto-detected)
+  --input <dir>         Folder containing <from>/ or <from>.json/.yaml/.yml/.po/.arb/.strings (auto-detected)
   --overwrite           Re-translate strings that already have a translation
   --dry-run             Show what would be translated without downloading or writing
   --fast                Greedy decoding: ~2x faster, slightly lower quality
@@ -256,7 +256,7 @@ async function cmdTranslate(argv: string[]): Promise<number> {
       const built = buildTarget(f.doc.data, f.existing, (s) => translations.get(s) ?? s, values.overwrite!);
       const { doc, added } = addPluralForms(built, intlCode(job.locale));
       pluralsAdded += added;
-      const text = f.doc.serialize(doc);
+      const text = f.doc.serialize(doc, job.locale.tag);
       const before = fs.existsSync(f.target) ? fs.readFileSync(f.target, "utf8") : undefined;
       if (text !== before) {
         fs.mkdirSync(path.dirname(f.target), { recursive: true });

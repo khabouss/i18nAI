@@ -25,6 +25,9 @@ test("translates the fixture app to French", { skip: !process.env.LOCALE_AI_E2E,
   const dash = JSON.parse(fs.readFileSync(path.join(dir, "locales/fr/dashboard.json"), "utf8"));
   const settingsText = fs.readFileSync(path.join(dir, "locales/fr/settings.yaml"), "utf8");
   const settings = parseYaml(settingsText);
+  const stringsText = fs.readFileSync(path.join(dir, "locales/fr/extra.strings"), "utf8");
+  const arb = JSON.parse(fs.readFileSync(path.join(dir, "locales/fr/app.arb"), "utf8"));
+  const poText = fs.readFileSync(path.join(dir, "locales/fr/messages.po"), "utf8");
 
   // Structure and non-strings preserved.
   assert.equal(dash.limit, 25);
@@ -55,10 +58,25 @@ test("translates the fixture app to French", { skip: !process.env.LOCALE_AI_E2E,
   assert.ok("member_many" in settings);
   assert.ok(settingsText.startsWith("title:"), "stays YAML, not reformatted as JSON");
 
-  // A second run is a no-op, for JSON and YAML alike.
-  const beforeJson = fs.readFileSync(path.join(dir, "locales/fr/common.json"), "utf8");
-  const beforeYaml = fs.readFileSync(path.join(dir, "locales/fr/settings.yaml"), "utf8");
+  // Apple .strings: comment kept, placeholder survives, stays .strings style.
+  assert.match(stringsText, /\/\* Shown on the welcome screen \*\//);
+  assert.match(stringsText, /"welcome" = "[^"]*%@[^"]*";/);
+  assert.notEqual(/"welcome" = "([^"]*)"/.exec(stringsText)![1], "Welcome back, %@!");
+
+  // ARB: translatable string translated, @key metadata and @@locale untouched except the locale itself.
+  assert.equal(arb["@@locale"], "fr");
+  assert.notEqual(arb.upgrade, "Upgrade to Pro");
+  assert.deepEqual(arb["@itemCount"], { description: "Number of items in the cart", placeholders: { count: {} } });
+  assert.match(arb.itemCount, /\{count, plural, =0 \{[^{}]+\} one \{#[^{}]*\} other \{#[^{}]*\}\}/);
+
+  // .po: msgid stays the stable key, msgstr is translated, the header's Language follows the target.
+  assert.match(poText, /Language: fr\\n/);
+  assert.match(poText, /msgid "support"\nmsgstr "[^"]*support@acme\.com[^"]*"/);
+  assert.doesNotMatch(poText, /msgstr "UPGRADE NOW"/);
+
+  // A second run is a no-op, across every supported format.
+  const targets = ["common.json", "settings.yaml", "extra.strings", "app.arb", "messages.po"];
+  const before = targets.map((f) => fs.readFileSync(path.join(dir, "locales/fr", f), "utf8"));
   run();
-  assert.equal(fs.readFileSync(path.join(dir, "locales/fr/common.json"), "utf8"), beforeJson);
-  assert.equal(fs.readFileSync(path.join(dir, "locales/fr/settings.yaml"), "utf8"), beforeYaml);
+  targets.forEach((f, i) => assert.equal(fs.readFileSync(path.join(dir, "locales/fr", f), "utf8"), before[i]));
 });

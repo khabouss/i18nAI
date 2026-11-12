@@ -1,0 +1,11 @@
+{
+  "@@locale": "en",
+  "itemCount": "{count, plural, =0{No items} one{# item} other{# items}}",
+  "@itemCount": {
+    "description": "Number of items in the cart",
+    "placeholders": {
+      "count": {}
+    }
+  },
+  "upgrade": "Upgrade to Pro"
+}

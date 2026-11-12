@@ -188,6 +188,69 @@ test("YAML locale files: dir layout (mixed with JSON), file layout, and round-tr
   assert.equal(targetFile(fl, "en", "fr", sourceFiles(fl, "en")[0]), path.join(fileRoot, "fr.yml"));
 });
 
+test("Apple .strings: comments kept per key, round-trip style, new keys appended", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-strings-"));
+  const file = path.join(root, "en.strings");
+  fs.writeFileSync(file, '/* Shown on launch */\n"greeting" = "Hello, %@!";\n\n"farewell" = "Goodbye";\n');
+  const doc = readLocaleDoc(file);
+  assert.equal(JSON.stringify(doc.data), '{"greeting":"Hello, %@!","farewell":"Goodbye"}');
+  assert.equal(doc.serialize(doc.data), '/* Shown on launch */\n"greeting" = "Hello, %@!";\n\n"farewell" = "Goodbye";\n');
+  assert.equal(
+    doc.serialize({ greeting: "Bonjour, %@!", farewell: "Au revoir", extra: "New" }),
+    '/* Shown on launch */\n"greeting" = "Bonjour, %@!";\n\n"farewell" = "Au revoir";\n\n"extra" = "New";\n',
+  );
+});
+
+test("ARB: @key metadata and @@locale are not translatable and are reinserted; @@locale follows the target", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-arb-"));
+  const file = path.join(root, "en.arb");
+  fs.writeFileSync(
+    file,
+    JSON.stringify(
+      { "@@locale": "en", greeting: "Hello, {name}!", "@greeting": { description: "Greeting", placeholders: { name: {} } } },
+      null,
+      2,
+    ),
+  );
+  const doc = readLocaleDoc(file);
+  assert.equal(JSON.stringify(doc.data), '{"greeting":"Hello, {name}!"}');
+  const built = { greeting: "Bonjour, {name}!" };
+  const out = JSON.parse(doc.serialize(built, "fr"));
+  assert.equal(out["@@locale"], "fr");
+  assert.equal(out.greeting, "Bonjour, {name}!");
+  assert.deepEqual(out["@greeting"], { description: "Greeting", placeholders: { name: {} } });
+});
+
+test("gettext .po: msgid is the stable key, plurals and the header pass through untranslated", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-po-"));
+  const file = path.join(root, "en.po");
+  fs.writeFileSync(
+    file,
+    [
+      'msgid ""',
+      'msgstr "Language: \\n"',
+      "",
+      "#: src/app.js:10",
+      'msgid "greeting"',
+      'msgstr "Hello!"',
+      "",
+      'msgid "items"',
+      'msgid_plural "items_plural"',
+      'msgstr[0] "one item"',
+      'msgstr[1] "many items"',
+      "",
+    ].join("\n"),
+  );
+  const doc = readLocaleDoc(file);
+  assert.equal(JSON.stringify(doc.data), '{"\\u0004greeting":"Hello!"}');
+  const built = { "\u0004greeting": "Bonjour!" };
+  const text = doc.serialize(built, "fr");
+  assert.match(text, /msgstr "Language: fr\\n"/);
+  assert.match(text, /#: src\/app\.js:10\nmsgid "greeting"\nmsgstr "Bonjour!"/);
+  // The plural entry is carried through unchanged (not part of `data`, not translated).
+  assert.match(text, /msgid_plural "items_plural"\nmsgstr\[0\] "one item"\nmsgstr\[1\] "many items"/);
+});
+
 /** A fake model: uppercases words, keeps tokens, optionally drops one. */
 function fakeTranslator(fn: (s: string) => string): Translator {
   return { translate: async (texts) => texts.map(fn), dispose: async () => {} };

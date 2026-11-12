@@ -1,0 +1,4 @@
+/* Shown on the welcome screen */
+"welcome" = "Welcome back, %@!";
+
+"logout" = "Log out";
