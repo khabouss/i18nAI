@@ -105,7 +105,7 @@ then declare it in `locale-ai.config.json`:
 }
 ```
 
-- `path` is a local folder (relative to the config file); `repo` is a Hugging Face repo with the converted files (uploaded output folder), downloaded and cached like built-in models.
+- `path` is a local folder (relative to the config file); `repo` is a Hugging Face repo with the converted files (uploaded output folder), downloaded and cached like built-in models — it must look like `namespace/name`, rejected otherwise (it's joined onto the cache directory with no further checks, so anything else could resolve outside it).
 - `prefix` is required for multi-target models (`convert` lists the model's `>>xx<<` tokens).
 - Project models take priority over built-ins for their language pairs and can be used for pivoting (e.g. `ja → en → tr`).
 

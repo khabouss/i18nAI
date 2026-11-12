@@ -31,8 +31,25 @@ export function cacheRoot(): string {
 
 const modelsRoot = () => path.join(cacheRoot(), "models");
 
-/** Where a model's files live: its local folder, or its cache folder. */
-export const modelDir = (m: ModelEntry) => m.path ?? path.join(modelsRoot(), ...m.repo!.split("/"));
+/**
+ * Where a model's files live: its local folder, or its cache folder. `repo` is
+ * validated as a plain "namespace/name" Hugging Face id when it comes from a
+ * project config (see catalog.ts's customEntries) — this is a second,
+ * independent check that the computed cache folder actually stays inside the
+ * cache root, since install() writes there and uninstall() recursively deletes
+ * it: a `repo` that somehow smuggled a ".." segment past that first check must
+ * never be allowed to touch a path outside the cache.
+ */
+export function modelDir(m: ModelEntry): string {
+  if (m.path) return m.path;
+  const root = modelsRoot();
+  const dir = path.join(root, ...m.repo!.split("/"));
+  const rel = path.relative(root, dir);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`${m.id}: "repo" (${m.repo}) resolves outside the model cache.`);
+  }
+  return dir;
+}
 
 export interface Manifest {
   format: number;

@@ -141,9 +141,23 @@ export interface CustomModelConfig {
 
 const asList = (v: string | string[]) => (Array.isArray(v) ? v : [v]).map((x) => parseLocale(x).lang);
 
+/**
+ * A Hugging Face repo id is always exactly "namespace/name". `models.ts` joins it
+ * onto the cache root with no further checks, so a `repo` of "../../../etc" (or any
+ * segment that isn't a real name) would resolve outside the cache directory — and
+ * install() writes there, uninstall() recursively deletes there.
+ */
+function validRepo(repo: string): boolean {
+  const parts = repo.split("/");
+  return parts.length === 2 && parts.every((p) => p !== "" && p !== "." && p !== ".." && !p.includes("\\"));
+}
+
 export function customEntries(models: CustomModelConfig[] | undefined, configDir: string): ModelEntry[] {
   return (models ?? []).map((c, i) => {
     if (!c.repo === !c.path) throw new Error(`models[${i}]: set exactly one of "repo" or "path".`);
+    if (c.repo && !validRepo(c.repo)) {
+      throw new Error(`models[${i}]: "repo" must look like "namespace/name" (a Hugging Face repo id), got "${c.repo}".`);
+    }
     if (!c.source || !c.target) throw new Error(`models[${i}]: "source" and "target" are required.`);
     const sources = asList(c.source);
     const targets = asList(c.target);

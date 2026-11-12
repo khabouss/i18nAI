@@ -705,6 +705,26 @@ test("custom models: config entries win over built-ins, prefixes per target", as
   // Pivot through a custom model: ja -> en (built-in) -> ko (custom).
   assert.deepEqual(resolveRoute(parseLocale("ja"), parseLocale("ko"), catalog)!.map((h) => h.model.id), ["ja-en", "my-ko"]);
   assert.throws(() => customEntries([{ source: "en", target: "ko" }], "/"), /exactly one of "repo" or "path"/);
+
+  // A "repo" that would resolve outside the model cache (install() writes there,
+  // uninstall() recursively deletes it) is rejected at config load, not at that point.
+  for (const bad of ["../../../etc/passwd", "org/..", "org/../../x", "/etc/passwd", "org\\name", "onlyonesegment"]) {
+    assert.throws(
+      () => customEntries([{ source: "en", target: "fr", repo: bad }], "/project"),
+      /must look like "namespace\/name"/,
+      `rejects repo "${bad}"`,
+    );
+  }
+});
+
+test("modelDir: refuses to resolve outside the model cache even if an unsafe repo got past config validation", async () => {
+  const { modelDir, cacheRoot } = await import("../src/models.ts");
+  assert.throws(
+    () => modelDir({ id: "evil", repo: "../../../etc", sources: ["en"], targets: ["fr"] } as never),
+    /resolves outside the model cache/,
+  );
+  const safe = modelDir({ id: "ok", repo: "khabouss/opus-mt-tc-big-en-fr-onnx", sources: ["en"], targets: ["fr"] } as never);
+  assert.equal(safe, path.join(cacheRoot(), "models/khabouss/opus-mt-tc-big-en-fr-onnx"));
 });
 
 test("SentencePiece encoder matches the reference segmentation (if a model is cached)", async (t) => {
