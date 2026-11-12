@@ -8,7 +8,7 @@
 
 Translate your i18n locale files **locally, on CPU, for free**. No API keys, no Python, nothing leaves your machine.
 
-<video src="https://github.com/khabouss/locale-ai/raw/main/media/demo.mp4" controls width="100%"></video>
+![demo](media/demo.gif)
 
 ```bash
 npx locale-ai translate --from en --to fr,es,de
