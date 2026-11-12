@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { reachableTargets, resolveRoute } from "../src/catalog.ts";
 import { translateStrings } from "../src/engine.ts";
 import { extractIcu } from "../src/icu.ts";
+import { extractPipePlural } from "../src/vue-plural.ts";
 import { parseLocale } from "../src/lang.ts";
 import { addPluralForms, buildTarget, detectLayout, pendingStrings, readLocaleDoc, sourceFiles, targetFile } from "../src/locales.ts";
 import type { Translator } from "../src/models.ts";
@@ -86,6 +87,22 @@ test("ICU plural/select extraction and rebuild", () => {
   assert.deepEqual(nested.units, ["He has ", "{__HASH__} cat", "{__HASH__} cats", "They have pets"]);
   assert.equal(extractIcu("{count, plural, one {broken}"), undefined);
   assert.equal(extractIcu("Hello {name}"), undefined);
+});
+
+test("vue-i18n pipe plural extraction and rebuild", () => {
+  const s = "no items | one item | {count} items";
+  const p = extractPipePlural(s)!;
+  assert.deepEqual(p.units, ["no items", "one item", "{count} items"]);
+  assert.equal(p.rebuild(["aucun article", "un article", "{count} articles"]), "aucun article | un article | {count} articles");
+
+  // No spaces around the pipe: the rebuilt string keeps that shape too.
+  const tight = extractPipePlural("a|b|{n} c")!;
+  assert.deepEqual(tight.units, ["a", "b", "{n} c"]);
+  assert.equal(tight.rebuild(["x", "y", "{n} z"]), "x|y|{n} z");
+
+  assert.equal(extractPipePlural("just one message"), undefined);
+  assert.equal(extractPipePlural("{choices, select, a {x|y} other {z}}"), undefined); // '|' only inside braces
+  assert.equal(extractPipePlural("leading | | double pipe"), undefined); // empty form: not a plural list
 });
 
 test("routes: direct, multi-target prefix, pivot, unsupported", () => {

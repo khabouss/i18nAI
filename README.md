@@ -31,7 +31,7 @@ Download 577 MB? (Y/n)
 - **Layouts**: `locales/en/*.json` (nested folders too) → `locales/fr/...`, or `messages/en.json` → `messages/fr.json`. `.json`, `.yaml`, `.yml`, `.po` (gettext), `.arb` (Flutter) and `.strings` (Apple) are all supported, mixed freely in the same project. Common folders (`locales`, `src/locales`, `public/locales`, `src/i18n`, `messages`, `lang`, ...) are found automatically, or pass `--input`.
 - **Placeholders are never translated or lost**: `{name}`, `{{count}}`, `%s`, `%1$s`, `%(name)s`, `%{name}`, `${name}`, `:attribute`, `$t(key)`, `@:key`, `<b>…</b>`, `<0>…</0>`, `&nbsp;`, URLs, e-mails.
 - **ICU MessageFormat**: `{count, plural, one {# file} other {# files}}`, `select`, nesting. Only the text is translated.
-- **i18next plurals**: adds the forms the target language needs (`_few`, `_many` for Arabic, Russian, Polish...).
+- **i18next plurals**: adds the forms the target language needs (`_few`, `_many` for Arabic, Russian, Polish...), so the app doesn't fall back to the English string — each added form copies the `_other` translation verbatim rather than inflecting it, so review and adjust the wording of `_zero`/`_two`/`_few`/`_many` by hand for languages where those forms use a different noun/adjective form.
 - **Incremental**: only missing keys are translated, existing translations are kept, re-runs are no-ops. `--overwrite` re-translates everything.
 - **Structure**: key order, numbers, booleans, arrays, indentation and trailing newline are preserved.
 
@@ -157,3 +157,4 @@ npm run build       # → dist/
 ## Next steps
 
 1. **More languages**: ja, ko have no usable OPUS-MT model yet; a different model family would be needed.
+2. **Rare batch-dependent mistranslation**: translating a short string (e.g. "© 2026 Acme Inc. All rights reserved.") can occasionally produce an unrelated/garbled result depending on which *other* strings share its translation batch — the same string translates correctly alone or in a different batch. Root cause: the built-in models are dynamically int8-quantized per-tensor, so the quantization scale for a batched activation tensor is computed from the whole batch, not per row; most of the time this is just quantization noise, but occasionally it's enough to tip beam search into a bad output with no warning. A fix would mean re-quantizing the models with static per-channel scales (or giving up CPU-batching speed) — out of scope for a quick patch; flagging here so it's a known, understood limitation rather than a silent one.

@@ -1,4 +1,5 @@
 import { extractIcu } from "./icu.ts";
+import { extractPipePlural } from "./vue-plural.ts";
 import type { Translator } from "./models.ts";
 import {
   fixTagSpacing,
@@ -283,8 +284,8 @@ export async function translateStrings(
   }
 
   const plans = remaining.map((s) => {
-    const icu = extractIcu(s);
-    return { source: s, icu, units: (icu?.units ?? [s]).map((text): Unit => ({ text, owner: s })) };
+    const split = extractIcu(s) ?? extractPipePlural(s);
+    return { source: s, split, units: (split?.units ?? [s]).map((text): Unit => ({ text, owner: s })) };
   });
   const units = plans.flatMap((p) => p.units);
 
@@ -296,7 +297,7 @@ export async function translateStrings(
 
   for (const p of plans) {
     const parts = p.units.map((u) => u.result ?? u.text);
-    translations.set(p.source, p.icu ? p.icu.rebuild(parts) : parts[0]);
+    translations.set(p.source, p.split ? p.split.rebuild(parts) : parts[0]);
   }
   return { translations, issues };
 }

@@ -67,7 +67,7 @@ export function detectLayout(cwd: string, from: string, input?: string): Layout 
     const directExt = EXTENSIONS.find((ext) => base === `${from}${ext}`);
     if (directExt && isFile(abs)) return { kind: "file", root: path.dirname(abs), ext: directExt };
     const l = layoutAt(abs, from);
-    if (!l) throw new Error(`No "${from}" locale found in ${input} (looked for ${from}/*.json and ${from}.json/.yaml/.yml).`);
+    if (!l) throw new Error(`No "${from}" locale found in ${input} (looked for ${from}/* and ${from}${EXTENSIONS.join("/")}).`);
     return l;
   }
   for (const c of CANDIDATES) {
@@ -75,7 +75,7 @@ export function detectLayout(cwd: string, from: string, input?: string): Layout 
     if (l) return l;
   }
   throw new Error(
-    `Could not find "${from}" locale files. Use --input <dir> to point at the folder containing ${from}/ or ${from}.json/.yaml/.yml.`,
+    `Could not find "${from}" locale files. Use --input <dir> to point at the folder containing ${from}/ or ${from}${EXTENSIONS.join("/")}.`,
   );
 }
 
