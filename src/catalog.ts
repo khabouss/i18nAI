@@ -26,6 +26,13 @@ export interface ModelEntry {
    * the output language. Returns undefined when the model is single-target.
    */
   prefix?: (target: Locale) => string;
+  /**
+   * Commit this repo is pinned to, so every install gets the exact same files
+   * instead of silently following wherever the repo's "main" branch goes next.
+   * Undefined resolves "main" at install time, as every model used to (still the
+   * case for this project's own `khabouss/*` repos — see PINNED_REVISIONS below).
+   */
+  revision?: string;
 }
 
 /** A model applied to one leg of a translation route. */
@@ -54,7 +61,92 @@ const DIRECT = [
 
 const ROMANCE = ["es", "pt", "ca", "gl", "oc", "it", "ro", "fr"];
 
-export const CATALOG: ModelEntry[] = [
+/**
+ * Every third-party repo this catalog downloads from, pinned to the commit that was
+ * current when each pair was added — so every install gets the exact same files
+ * instead of silently picking up whatever Xenova's "main" branch has moved to by
+ * then, with no changelog entry or version bump on our side to explain why
+ * translations changed. This project's own `khabouss/*` repos are deliberately left
+ * out: we only ever change those ourselves, so there's no silent-drift risk to
+ * guard against, and pinning them would just mean remembering to bump a SHA by hand
+ * every time a better conversion is published.
+ */
+const PINNED_REVISIONS: Record<string, string> = {
+  "Xenova/opus-mt-ROMANCE-en": "f60feaabe8bb435a5871e7702b25f53a01e770f8",
+  "Xenova/opus-mt-af-en": "0eba4e40af86c6ad316a58fc9a7ed1134b05fd90",
+  "Xenova/opus-mt-ar-en": "09c7556866400dcc53562ba8d7035119e7d9a2c1",
+  "Xenova/opus-mt-cs-en": "c9f7336d1cf49ba5b7a412cba3b86999fa781716",
+  "Xenova/opus-mt-da-de": "3784087953108e4ee9957c8f9eff11c0bf0cabda",
+  "Xenova/opus-mt-da-en": "6496d5e47a016552357be8f06294096609256ac4",
+  "Xenova/opus-mt-de-en": "399dfd68706739fffd503f876093e455ae268a06",
+  "Xenova/opus-mt-de-es": "d339419ee3bda301bdcd00249d4436b74664ee7e",
+  "Xenova/opus-mt-de-fr": "e783da03d247c4d16778e938530e9b5d7bd1523d",
+  "Xenova/opus-mt-en-ROMANCE": "9d2ba69ac80c8e8453c3d9a1e2323a0e7b8ca3cd",
+  "Xenova/opus-mt-en-af": "3d48312617d092d77cb5aef9f9e9636ad639dd8d",
+  "Xenova/opus-mt-en-cs": "ed163ca109a93297e2f055eb3397bd33230141ad",
+  "Xenova/opus-mt-en-da": "33862dc071a5cc43e821e60742553c501c587e77",
+  "Xenova/opus-mt-en-de": "1ca130c44c4c5441ef16d48aae521a424ab644f7",
+  "Xenova/opus-mt-en-es": "4b002a4c7edd54a7ced58877258b87f7efd3f892",
+  "Xenova/opus-mt-en-fi": "4e5799273dbd7cce94c1e99cc9d3acb9f191b8eb",
+  "Xenova/opus-mt-en-hi": "7aad72006a1588a9c3485ed6203aed99eebbc872",
+  "Xenova/opus-mt-en-hu": "1b7df958c1bd8f094eff1ce76d536468923ed7e3",
+  "Xenova/opus-mt-en-id": "b3b41f654c2fb3286d007dee1da7b0f47fd27d82",
+  "Xenova/opus-mt-en-it": "075406e3c8c2c30634d4a1bd8f00c21d9e162011",
+  "Xenova/opus-mt-en-nl": "c3a0541231a7329b4492809fc2bd7ab7d2ceb0bc",
+  "Xenova/opus-mt-en-ro": "3d816891778276930df2a45cbfb70689b3fe8981",
+  "Xenova/opus-mt-en-sv": "33d522d806c041cdebecd549c558d22a2b9b4ea4",
+  "Xenova/opus-mt-en-vi": "30bcd461c0d7338ad106b36314d3eedc2d4e998c",
+  "Xenova/opus-mt-en-xh": "1ab9c4f4400ea4805f220ff5d551d3d0169b7a96",
+  "Xenova/opus-mt-en-zh": "046f55aec303cdee3e0318604406d4df20f1e8ea",
+  "Xenova/opus-mt-es-de": "7f493e4b81b684478396f37de4c1ebc28ecd5855",
+  "Xenova/opus-mt-es-en": "eadfd7c658a9d8929ac3b8e996b68a68e2c7d480",
+  "Xenova/opus-mt-es-fr": "3bef5f612825d503f6fb85e0527a1fe30f2578c2",
+  "Xenova/opus-mt-es-it": "596c67cda7cb919f0d67221f3a31bd7df79f19d0",
+  "Xenova/opus-mt-es-ru": "268ccd60bde3cabde17068d482ca6930512f1a85",
+  "Xenova/opus-mt-et-en": "58104952b730220eb7a9cdbbe19533a064f40dc0",
+  "Xenova/opus-mt-fi-de": "6d93339597e19574f543259315d2400939067c1e",
+  "Xenova/opus-mt-fi-en": "a623e4812687be788e3ab720c8a950ab64704793",
+  "Xenova/opus-mt-fr-de": "7eea1996b4480d073cf560fcba6d4480aaf9a2bb",
+  "Xenova/opus-mt-fr-en": "6b166a182780e118c997879d0ad5be4b53671644",
+  "Xenova/opus-mt-fr-es": "962338be51033b548c13dbb6f4da3ddb8c8aba0e",
+  "Xenova/opus-mt-fr-ro": "d2b0db550987291ebb35cdeb3a5394d176ecdcc6",
+  "Xenova/opus-mt-fr-ru": "c2ec732b045ae9f0e1ae1ea9267840145a8c03fe",
+  "Xenova/opus-mt-hi-en": "99853100ed9d932987a6816e8cf7b1b6742a6116",
+  "Xenova/opus-mt-hu-en": "c9e8a7617fb4cb4fca3785c5bb22cfe457cde00b",
+  "Xenova/opus-mt-id-en": "c38ef36c843b71177da903442835c3c870975fd6",
+  "Xenova/opus-mt-it-en": "fd0b89b9c052adc1f2f64152f555aa17353728be",
+  "Xenova/opus-mt-it-es": "0eba27fe6da2208231ea5e7047b0f62241ffc2bb",
+  "Xenova/opus-mt-it-fr": "7843e3b7137d19face19cb32e27256888d26fe84",
+  "Xenova/opus-mt-ja-en": "1a906cfaaf7c8f4193f67f5885c082aa6dbd9d16",
+  "Xenova/opus-mt-ko-en": "d9fa1ac6008242100fecb4fff9b0a5917a1be81f",
+  "Xenova/opus-mt-nl-en": "82c42d95d1508037cbe7172d85fd4e940a2f3584",
+  "Xenova/opus-mt-nl-fr": "6c8ebb68522ffd80cf3474b2dc44f4b5f741e9cd",
+  "Xenova/opus-mt-no-de": "5ed60d1d245fe19d3ee80a172de6b38724642eb3",
+  "Xenova/opus-mt-pl-en": "aeaf0e003b045248c28a559a5ce6027b54ebdaba",
+  "Xenova/opus-mt-ro-fr": "48d206ed25c6f5b869a49a79207906c401334727",
+  "Xenova/opus-mt-ru-en": "afe8c6c738ec81b6d033fd8f44f9678a639a7c67",
+  "Xenova/opus-mt-ru-es": "9cb5fb9fae4d5c0c731dcc3ba74c4e0a87f15eb0",
+  "Xenova/opus-mt-ru-fr": "c7275f468246036d24bfe14ce8465e94e1037af9",
+  "Xenova/opus-mt-ru-uk": "6d8a744ed6eafd9003bcc2b052c4575de0485e1e",
+  "Xenova/opus-mt-sv-en": "63a40256869b6a2b29a84e47aa7f03524fa5f3a2",
+  "Xenova/opus-mt-th-en": "7f0406b972f742985cfbe3be8f61dead9f1bc0e3",
+  "Xenova/opus-mt-tr-en": "78247f41f354af036d24e6f0f8a3d02c6806f96e",
+  "Xenova/opus-mt-uk-en": "b2ad6afa424aaeff8913ff350860b7a7b7c0a607",
+  "Xenova/opus-mt-uk-ru": "cfb76ccd207734d7847679664fa4538cda5ed597",
+  "Xenova/opus-mt-vi-en": "541dfd72ec07e8f1563795e0224408ad8d729e80",
+  "Xenova/opus-mt-xh-en": "f2950c1503ae17ba532ea858914ea13838bc2ab1",
+  "Xenova/opus-mt-zh-en": "39d480d52a9ea3065a1f117adfe4dbc55de10e6f",
+};
+
+/** Applies PINNED_REVISIONS by the entry's final `repo` (after any override), not by where `pair()` first pointed it. */
+function pinned(entries: ModelEntry[]): ModelEntry[] {
+  return entries.map((m) => ({
+    ...m,
+    revision: m.repo && !m.repo.startsWith("khabouss/") ? PINNED_REVISIONS[m.repo] : undefined,
+  }));
+}
+
+export const CATALOG: ModelEntry[] = pinned([
   ...DIRECT.map((p) => {
     const [s, t] = p.split("-");
     return pair(s, t);
@@ -124,7 +216,7 @@ export const CATALOG: ModelEntry[] = [
     sources: ROMANCE,
     targets: ["en"],
   },
-];
+]);
 
 /** A model declared in locale-ai.config.json. */
 export interface CustomModelConfig {

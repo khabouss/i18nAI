@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { reachableTargets, resolveRoute } from "../src/catalog.ts";
+import { CATALOG, reachableTargets, resolveRoute } from "../src/catalog.ts";
 import { translateStrings } from "../src/engine.ts";
 import { extractIcu } from "../src/icu.ts";
 import { extractPipePlural } from "../src/vue-plural.ts";
@@ -143,6 +143,15 @@ test("routes: direct, multi-target prefix, pivot, unsupported", () => {
   assert.equal(resolveRoute(en, parseLocale("en-GB")), undefined);
   assert.equal(resolveRoute(en, parseLocale("tlh")), undefined);
   assert.ok(reachableTargets("en").includes("de"));
+});
+
+test("CATALOG: third-party repos are pinned to a commit, this project's own khabouss/* repos are not", () => {
+  const withRepo = CATALOG.filter((m) => m.repo);
+  assert.ok(withRepo.length > 0);
+  for (const m of withRepo) {
+    if (m.repo!.startsWith("khabouss/")) assert.equal(m.revision, undefined, m.repo);
+    else assert.match(m.revision ?? "", /^[0-9a-f]{40}$/, m.repo);
+  }
 });
 
 test("parseLocale normalizes tags", () => {

@@ -152,7 +152,7 @@ async function fetchWithRetry(url: string, attempts = 3): Promise<Response> {
 /** Resolves the exact files, sizes and checksums to download for a model. */
 export async function planInstall(m: ModelEntry): Promise<InstallPlan> {
   if (!m.repo) throw new Error(`${m.id} is a local model; nothing to download.`);
-  const info = (await getJson(`${HF}/api/models/${m.repo}/revision/main`)) as { sha: string };
+  const info = (await getJson(`${HF}/api/models/${m.repo}/revision/${m.revision ?? "main"}`)) as { sha: string };
   const tree = (await getJson(`${HF}/api/models/${m.repo}/tree/${info.sha}?recursive=true`)) as Array<{
     path: string;
     size: number;
