@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.2
+
+Three Android `strings.xml` bugs found by the same external review, all from its regex-based parsing not accounting for Android-specific value conventions:
+
+- **Inline markup (`<xliff:g id="...">...</xliff:g>`, Android's own placeholder-wrapper tag) came out HTML-escaped** — visible as literal `&lt;xliff:g...&gt;` text on screen instead of real XML. It's now written the same tag-protected way XLIFF's own inline `<x>`/`<g>` markup already was.
+- **A value that's purely a reference to another resource (`@string/app_name`) was sent to the translation model.** It's now left alone and reproduced byte-for-byte, regardless of its own `translatable` attribute.
+- **A value wrapped in a literal `"..."` pair — Android's convention for preserving leading/trailing whitespace — lost its quotes and that whitespace.** Both are now kept on write.
+
 ## 0.7.1
 
 - **`npm install` could fail entirely on a network that can't reach `api.nuget.org`** — `onnxruntime-node`'s own postinstall tries to download a ~260 MB CUDA provider locale-ai never uses (CPU only), and that download failing took the whole install down with it, which is common behind corporate proxies and in locked-down CI. The README now documents `ONNXRUNTIME_NODE_INSTALL=skip npm install locale-ai` to skip it up front (also a faster install either way: ~51 MB / ~3s). As defense in depth, locale-ai now also re-runs its own CUDA-provider cleanup on every CLI invocation, not just at install time, since npm doesn't guarantee the postinstall that's meant to remove it runs after onnxruntime-node's own download finishes.

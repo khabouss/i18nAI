@@ -450,6 +450,43 @@ test("Android strings.xml: strings, arrays, plurals, translatable=false and esca
   assert.deepEqual(Object.keys(withMissing.doc as Record<string, unknown>).includes("item_count"), true);
 });
 
+test("Android strings.xml: inline <xliff:g> markup survives a write, @string/ refs are never translated, quote-wrapped whitespace is kept", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-android-xml2-"));
+  const file = path.join(dir, "strings.xml");
+  const text = `<resources>
+    <string name="time_left">You have <xliff:g id="time">%1$s</xliff:g> left</string>
+    <string name="app_name_ref">@string/app_name</string>
+    <string name="leading_space">"  padded on both sides  "</string>
+    <string name="plain">Plain text</string>
+</resources>
+`;
+  fs.writeFileSync(file, text);
+  const doc = readLocaleDoc(file, "en", true, false);
+  assert.equal(JSON.stringify(doc.data), JSON.stringify({
+    time_left: "You have <xliff:g id=\"time\">%1$s</xliff:g> left",
+    leading_space: "  padded on both sides  ",
+    plain: "Plain text",
+  }));
+  // app_name_ref isn't in `data` at all: it's a pure resource reference, never a candidate for translation.
+  assert.equal(Object.prototype.hasOwnProperty.call(doc.data as object, "app_name_ref"), false);
+
+  const out = doc.serialize(
+    {
+      time_left: "Il vous reste <xliff:g id=\"time\">%1$s</xliff:g>",
+      leading_space: "  rembourré des deux côtés  ",
+      plain: "Texte simple",
+    },
+    "fr",
+  );
+  // Real inline markup comes out as actual XML, not HTML-escaped into visible text.
+  assert.match(out, /<string name="time_left">Il vous reste <xliff:g id="time">%1\$s<\/xliff:g><\/string>/);
+  assert.doesNotMatch(out, /&lt;xliff:g/);
+  // The reference is reproduced byte-for-byte, never sent through translation.
+  assert.match(out, /<string name="app_name_ref">@string\/app_name<\/string>/);
+  // Quote-wrapping (and the whitespace it protects) survives the round-trip.
+  assert.match(out, /<string name="leading_space">"  rembourré des deux côtés  "<\/string>/);
+});
+
 test("Apple .xcstrings: source extraction skips shouldTranslate=false/device variants, falls back to the key itself", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xcstrings-"));
   const file = path.join(dir, "Localizable.xcstrings");
