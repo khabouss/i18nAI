@@ -225,7 +225,7 @@ async function cmdTranslate(argv: string[]): Promise<number> {
   log(`locale-ai ${VERSION}`);
   log(
     `Found ${sources.length} ${from.tag} file${sources.length === 1 ? "" : "s"} in ${rel(layout.root)}/` +
-      (layout.kind === "dir" ? `${from.tag}/` : ""),
+      (layout.kind === "dir" ? `${from.tag}${layout.dirSuffix ?? ""}/` : ""),
   );
 
   let failures = 0;

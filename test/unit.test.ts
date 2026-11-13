@@ -287,6 +287,50 @@ test("detects dir and file layouts", () => {
   assert.throws(() => detectLayout(root, "xx"));
 });
 
+test("detects Rails' config/locales convention with no --input", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-rails-"));
+  fs.mkdirSync(path.join(root, "config/locales"), { recursive: true });
+  fs.writeFileSync(path.join(root, "config/locales/en.yml"), "en:\n  hello: Hi\n");
+  const l = detectLayout(root, "en");
+  assert.deepEqual(l, { kind: "file", root: path.join(root, "config/locales"), ext: ".yml" });
+  assert.equal(targetFile(l, "en", "fr", sourceFiles(l, "en")[0]), path.join(root, "config/locales/fr.yml"));
+});
+
+test("Flutter's app_<locale>.arb filename prefix is detected, auto and via --input", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-flutter-"));
+  fs.mkdirSync(path.join(root, "lib/l10n"), { recursive: true });
+  fs.writeFileSync(path.join(root, "lib/l10n/app_en.arb"), '{"@@locale": "en", "hello": "Hi"}');
+  fs.writeFileSync(path.join(root, "lib/l10n/app_fr.arb"), '{"@@locale": "fr", "hello": "Salut"}');
+
+  const l = detectLayout(root, "en", "lib/l10n");
+  assert.deepEqual(l, { kind: "file", root: path.join(root, "lib/l10n"), ext: ".arb", prefix: "app" });
+  assert.deepEqual(existingTargets(l, "en"), ["fr"]);
+  assert.equal(targetFile(l, "en", "de", sourceFiles(l, "en")[0]), path.join(root, "lib/l10n/app_de.arb"));
+
+  // Pointing --input directly at the source file itself also resolves it.
+  const direct = detectLayout(root, "en", "lib/l10n/app_en.arb");
+  assert.deepEqual(direct, { kind: "file", root: path.join(root, "lib/l10n"), ext: ".arb", prefix: "app" });
+});
+
+test("Apple's <locale>.lproj directory suffix is detected, auto and via --input", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-ios-"));
+  fs.mkdirSync(path.join(root, "en.lproj"), { recursive: true });
+  fs.mkdirSync(path.join(root, "fr.lproj"), { recursive: true });
+  fs.writeFileSync(path.join(root, "en.lproj/Localizable.strings"), '"hello" = "Hi";\n');
+  fs.writeFileSync(path.join(root, "fr.lproj/Localizable.strings"), '"hello" = "Salut";\n');
+
+  const l = detectLayout(root, "en", root);
+  assert.deepEqual(l, { kind: "dir", root, dirSuffix: ".lproj" });
+  assert.deepEqual(existingTargets(l, "en"), ["fr"]);
+  const files = sourceFiles(l, "en");
+  assert.equal(files.length, 1);
+  assert.equal(targetFile(l, "en", "de", files[0]), path.join(root, "de.lproj/Localizable.strings"));
+
+  // Pointing --input directly at the en.lproj directory also resolves it.
+  const direct = detectLayout(root, "en", path.join(root, "en.lproj"));
+  assert.deepEqual(direct, { kind: "dir", root, dirSuffix: ".lproj" });
+});
+
 test("flattenStrings: key paths for nested objects and arrays", () => {
   assert.deepEqual(flattenStrings({ a: "x", b: { c: "y" }, d: ["p", "q"] }), [
     { path: "a", value: "x" },

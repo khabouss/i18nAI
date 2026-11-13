@@ -16,6 +16,10 @@ export interface Layout {
   root: string;
   /** For kind "file": the source file's extension (e.g. ".json", ".po"). */
   ext?: string;
+  /** For kind "file": a filename prefix shared by every locale file (Flutter's "app_en.arb"). */
+  prefix?: string;
+  /** For kind "dir": a suffix appended to the locale tag to name the directory (Apple's "en.lproj"). */
+  dirSuffix?: string;
 }
 
 const EXTENSIONS = [".json", ".yaml", ".yml", ".po", ".pot", ".arb", ".strings"];
@@ -40,6 +44,7 @@ const CANDIDATES = [
   "src/locale",
   "app/i18n",
   "static/locales",
+  "config/locales",
   ".",
 ];
 
@@ -51,22 +56,55 @@ function fileExtAt(root: string, from: string): string | undefined {
   return EXTENSIONS.find((ext) => isFile(path.join(root, `${from}${ext}`)));
 }
 
+/**
+ * A prefixed source-locale file, if `<root>/<prefix>_<from><ext>` exists for one of
+ * EXTENSIONS — the convention `flutter gen-l10n` uses by default ("app_en.arb").
+ */
+function prefixedFileAt(root: string, from: string): { ext: string; prefix: string } | undefined {
+  if (!isDir(root)) return undefined;
+  for (const entry of fs.readdirSync(root)) {
+    if (!isFile(path.join(root, entry))) continue;
+    for (const ext of EXTENSIONS) {
+      const suffix = `_${from}${ext}`;
+      if (entry.endsWith(suffix) && entry.length > suffix.length) {
+        return { ext, prefix: entry.slice(0, -suffix.length) };
+      }
+    }
+  }
+  return undefined;
+}
+
 function layoutAt(root: string, from: string): Layout | undefined {
   const dir = path.join(root, from);
   if (isDir(dir) && listLocaleFiles(dir).length > 0) return { kind: "dir", root };
+  const lprojDir = path.join(root, `${from}.lproj`);
+  if (isDir(lprojDir) && listLocaleFiles(lprojDir).length > 0) return { kind: "dir", root, dirSuffix: ".lproj" };
   const ext = fileExtAt(root, from);
   if (ext) return { kind: "file", root, ext };
+  const prefixed = prefixedFileAt(root, from);
+  if (prefixed) return { kind: "file", root, ext: prefixed.ext, prefix: prefixed.prefix };
   return undefined;
 }
+
+const dirNameFor = (layout: Layout, tag: string) => `${tag}${layout.dirSuffix ?? ""}`;
+const fileNameFor = (layout: Layout, tag: string, ext: string) => `${layout.prefix ? `${layout.prefix}_` : ""}${tag}${ext}`;
 
 export function detectLayout(cwd: string, from: string, input?: string): Layout {
   if (input) {
     const abs = path.resolve(cwd, input);
     // Accept pointing at the source locale itself: --input locales/en or locales/en.json
     if (path.basename(abs) === from && isDir(abs)) return { kind: "dir", root: path.dirname(abs) };
+    if (path.basename(abs) === `${from}.lproj` && isDir(abs)) {
+      return { kind: "dir", root: path.dirname(abs), dirSuffix: ".lproj" };
+    }
     const base = path.basename(abs);
     const directExt = EXTENSIONS.find((ext) => base === `${from}${ext}`);
     if (directExt && isFile(abs)) return { kind: "file", root: path.dirname(abs), ext: directExt };
+    const prefixedExt = EXTENSIONS.find((ext) => base.endsWith(`_${from}${ext}`) && base.length > `_${from}${ext}`.length);
+    if (prefixedExt && isFile(abs)) {
+      const suffix = `_${from}${prefixedExt}`;
+      return { kind: "file", root: path.dirname(abs), ext: prefixedExt, prefix: base.slice(0, -suffix.length) };
+    }
     const l = layoutAt(abs, from);
     if (!l) throw new Error(`No "${from}" locale found in ${input} (looked for ${from}/* and ${from}${EXTENSIONS.join("/")}).`);
     return l;
@@ -92,17 +130,19 @@ function listLocaleFiles(dir: string): string[] {
 }
 
 export function sourceFiles(layout: Layout, from: string): string[] {
-  return layout.kind === "dir" ? listLocaleFiles(path.join(layout.root, from)) : [path.join(layout.root, `${from}${layout.ext}`)];
+  return layout.kind === "dir"
+    ? listLocaleFiles(path.join(layout.root, dirNameFor(layout, from)))
+    : [path.join(layout.root, fileNameFor(layout, from, layout.ext!))];
 }
 
 /** A translated file is a real PO, never a template, regardless of what the source was. */
 const outputExt = (ext: string) => (ext === ".pot" ? ".po" : ext);
 
 export function targetFile(layout: Layout, from: string, to: string, src: string): string {
-  if (layout.kind === "file") return path.join(layout.root, `${to}${outputExt(layout.ext!)}`);
-  const rel = path.relative(path.join(layout.root, from), src);
+  if (layout.kind === "file") return path.join(layout.root, fileNameFor(layout, to, outputExt(layout.ext!)));
+  const rel = path.relative(path.join(layout.root, dirNameFor(layout, from)), src);
   const ext = path.extname(rel);
-  return path.join(layout.root, to, ext === ".pot" ? `${rel.slice(0, -ext.length)}.po` : rel);
+  return path.join(layout.root, dirNameFor(layout, to), ext === ".pot" ? `${rel.slice(0, -ext.length)}.po` : rel);
 }
 
 /** True when `tag` parses as a locale (e.g. "fr", "pt-BR") — rejects names like "__mocks__" or "schemas". */
@@ -119,19 +159,22 @@ function looksLikeLocale(tag: string): boolean {
 export function existingTargets(layout: Layout, from: string): string[] {
   if (layout.kind === "file") {
     const ext = layout.ext!;
+    const prefix = layout.prefix ? `${layout.prefix}_` : "";
     return fs
       .readdirSync(layout.root)
-      .filter((f) => f.endsWith(ext) && f.slice(0, -ext.length) !== from)
-      .map((f) => f.slice(0, -ext.length))
+      .filter((f) => f.startsWith(prefix) && f.endsWith(ext) && f.slice(prefix.length, -ext.length) !== from)
+      .map((f) => f.slice(prefix.length, -ext.length))
       .filter(looksLikeLocale)
       .sort();
   }
+  const suffix = layout.dirSuffix ?? "";
   return fs
     .readdirSync(layout.root, { withFileTypes: true })
-    .filter((e) => e.isDirectory() && !e.name.startsWith(".") && e.name !== "node_modules" && e.name !== from)
-    .map((e) => e.name)
+    .filter((e) => e.isDirectory() && !e.name.startsWith(".") && e.name !== "node_modules" && e.name.endsWith(suffix))
+    .map((e) => (suffix ? e.name.slice(0, -suffix.length) : e.name))
+    .filter((name) => name !== from)
     .filter(looksLikeLocale)
-    .filter((name) => listLocaleFiles(path.join(layout.root, name)).length > 0)
+    .filter((name) => listLocaleFiles(path.join(layout.root, dirNameFor(layout, name))).length > 0)
     .sort();
 }
 
