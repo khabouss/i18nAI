@@ -64,6 +64,13 @@ test("mask leaves ordinary text alone", () => {
   }
 });
 
+test("© / ® / ™ symbols are masked so a pivoted (two-hop) translation can't drop them", () => {
+  const m = mask("© 2026 Acme. All rights reserved.");
+  assert.deepEqual(m.tokens, ["©"]);
+  assert.equal(unmask("{0} 2026 Acme. Tous droits réservés.", m), "© 2026 Acme. Tous droits réservés.");
+  assert.deepEqual(mask("Acme® and AcmePro™").tokens, ["®", "™"]);
+});
+
 test("natural markers: {n} for variables, <n>…</n> for tags", () => {
   assert.equal(mask("Hi {{name}}, see <a href=\"/x\">this</a><br/> or <b>that</b>").text, "Hi {0}, see <0>this</0><1/> or <2>that</2>");
   assert.equal(mask("Press <0>Save</0> then <1/>").text, "Press <0>Save</0> then <1/>");
@@ -318,6 +325,16 @@ test("detects dir and file layouts", () => {
   const f = detectLayout(root, "en", "messages");
   assert.equal(targetFile(f, "en", "de", sourceFiles(f, "en")[0]), path.join(root, "messages/de.json"));
   assert.throws(() => detectLayout(root, "xx"));
+});
+
+test("detectLayout: --from mismatch on a non-English-source project hints the locale actually found", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-hint-"));
+  fs.mkdirSync(path.join(root, "src/locales/fr"), { recursive: true });
+  fs.writeFileSync(path.join(root, "src/locales/fr/common.json"), '{"hello":"Bonjour"}');
+  assert.throws(() => detectLayout(root, "en"), /Found "fr" instead — did you mean --from fr\?/);
+
+  const root2 = fs.mkdtempSync(path.join(os.tmpdir(), "lai-hint2-"));
+  assert.throws(() => detectLayout(root2, "en"), (e: Error) => !/did you mean/.test(e.message));
 });
 
 test("detects Rails' config/locales convention with no --input", () => {

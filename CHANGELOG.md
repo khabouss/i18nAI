@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.6
+
+Findings from testing the published package as a real first-time user (a French-source app adding en/ar/pt):
+
+- **`©`/`®`/`™` could be silently dropped on a pivoted (two-hop) translation.** A footer like "© 2026 Acme. All rights reserved." kept its `©` translating `fr → en` directly, but lost it on `fr → en → ar`/`fr → en → pt`. These symbols are now masked and restored like every other placeholder, no config needed, so they survive any number of hops. ([khabouss/locale-ai#5](https://github.com/khabouss/locale-ai/issues/5))
+- **Forgetting `--from` on a non-English-source project gave no hint.** `--from` defaults to `en`; a project whose source is actually, say, `fr` just got "Could not find en locale files" with no pointer to what *was* there. The error now scans the same folders and suggests the locale it actually found (`Found "fr" instead — did you mean --from fr?`). ([khabouss/locale-ai#4](https://github.com/khabouss/locale-ai/issues/4))
+- **Docs**: explained the `install-scripts` warning npm 11.20+ prints on a fresh install (harmless — locale-ai's CUDA-trim safety net runs regardless), and added guidance on pivot-translation error propagation (fixing the intermediate language doesn't fix a pivoted target) and glossary-ing known MT weak spots (brand transliteration, false-cognate traps, untranslated domain slang) up front. ([khabouss/locale-ai#3](https://github.com/khabouss/locale-ai/issues/3), [khabouss/locale-ai#6](https://github.com/khabouss/locale-ai/issues/6))
+
 ## 0.7.5
 
 A follow-up round from the same external review:
