@@ -71,7 +71,8 @@ Usage:
 Translate options:
   --from <locale>       Source locale (default: en)
   --to <locales>        Target locale(s), comma separated: fr,es,pt-BR
-  --input <dir>         Folder containing <from>/ or <from>.json/.yaml/.yml/.po/.pot/.arb/.strings (auto-detected)
+  --input <dir>         Folder containing <from>/ or <from>.json/.yaml/.yml/.po/.pot/.arb/.strings,
+                        or an Android res/ folder (values/strings.xml) (auto-detected)
   --overwrite           Re-translate strings that already have a translation
   --dry-run             Show what would be translated without downloading or writing
   --fast                Greedy decoding: ~2x faster, slightly lower quality

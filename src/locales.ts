@@ -5,14 +5,17 @@ import { parseLocale } from "./lang.ts";
 
 /**
  * Supported layouts:
- *   dir:  <root>/en/common.json, <root>/en/auth/login.json  ->  <root>/fr/...
- *   file: <root>/en.json                                    ->  <root>/fr.json
+ *   dir:     <root>/en/common.json, <root>/en/auth/login.json  ->  <root>/fr/...
+ *   file:    <root>/en.json                                    ->  <root>/fr.json
+ *   android: <root>/values/strings.xml                         ->  <root>/values-fr/strings.xml
  *
- * Both layouts accept ".json", ".yaml", ".yml", ".po", ".arb" or ".strings" files,
- * independently per file.
+ * dir and file both accept ".json", ".yaml", ".yml", ".po", ".arb" or ".strings"
+ * files, independently per file. android is its own thing: the file is always named
+ * "strings.xml", and the locale lives in the untagged "values" (source) vs.
+ * "values-<qualifier>" (target) directory name instead of the file name.
  */
 export interface Layout {
-  kind: "dir" | "file";
+  kind: "dir" | "file" | "android";
   root: string;
   /** For kind "file": the source file's extension (e.g. ".json", ".po"). */
   ext?: string;
@@ -45,8 +48,24 @@ const CANDIDATES = [
   "app/i18n",
   "static/locales",
   "config/locales",
+  "app/src/main/res",
+  "src/main/res",
+  "res",
   ".",
 ];
+
+/** Android's `values-<qualifier>` folder suffix for a locale tag: "fr" -> "fr", "pt-BR" -> "pt-rBR". */
+function androidQualifier(tag: string): string {
+  const l = parseLocale(tag);
+  if (l.script) throw new Error(`Android resource qualifiers for scripts (got "${tag}") aren't supported; use a plain language or language-region tag.`);
+  return l.region ? `${l.lang}-r${l.region}` : l.lang;
+}
+
+/** Reverse of androidQualifier: "fr" -> "fr", "pt-rBR" -> "pt-BR". Undefined for a qualifier it can't parse (script/BCP-47 "b+..." variants). */
+function tagFromAndroidQualifier(qualifier: string): string | undefined {
+  const m = /^([a-z]{2,3})(?:-r([A-Za-z]{2}))?$/.exec(qualifier);
+  return m ? (m[2] ? `${m[1]}-${m[2].toUpperCase()}` : m[1]) : undefined;
+}
 
 const isDir = (p: string) => fs.existsSync(p) && fs.statSync(p).isDirectory();
 const isFile = (p: string) => fs.existsSync(p) && fs.statSync(p).isFile();
@@ -74,11 +93,18 @@ function prefixedFileAt(root: string, from: string): { ext: string; prefix: stri
   return undefined;
 }
 
+/** Android's default (untagged) `values/strings.xml` resource folder, if present. */
+function androidLayoutAt(root: string): Layout | undefined {
+  return isFile(path.join(root, "values", "strings.xml")) ? { kind: "android", root } : undefined;
+}
+
 function layoutAt(root: string, from: string): Layout | undefined {
   const dir = path.join(root, from);
   if (isDir(dir) && listLocaleFiles(dir).length > 0) return { kind: "dir", root };
   const lprojDir = path.join(root, `${from}.lproj`);
   if (isDir(lprojDir) && listLocaleFiles(lprojDir).length > 0) return { kind: "dir", root, dirSuffix: ".lproj" };
+  const android = androidLayoutAt(root);
+  if (android) return android;
   const ext = fileExtAt(root, from);
   if (ext) return { kind: "file", root, ext };
   const prefixed = prefixedFileAt(root, from);
@@ -96,6 +122,9 @@ export function detectLayout(cwd: string, from: string, input?: string): Layout 
     if (path.basename(abs) === from && isDir(abs)) return { kind: "dir", root: path.dirname(abs) };
     if (path.basename(abs) === `${from}.lproj` && isDir(abs)) {
       return { kind: "dir", root: path.dirname(abs), dirSuffix: ".lproj" };
+    }
+    if (path.basename(abs) === "values" && isFile(path.join(abs, "strings.xml"))) {
+      return { kind: "android", root: path.dirname(abs) };
     }
     const base = path.basename(abs);
     const directExt = EXTENSIONS.find((ext) => base === `${from}${ext}`);
@@ -130,6 +159,7 @@ function listLocaleFiles(dir: string): string[] {
 }
 
 export function sourceFiles(layout: Layout, from: string): string[] {
+  if (layout.kind === "android") return [path.join(layout.root, "values", "strings.xml")];
   return layout.kind === "dir"
     ? listLocaleFiles(path.join(layout.root, dirNameFor(layout, from)))
     : [path.join(layout.root, fileNameFor(layout, from, layout.ext!))];
@@ -139,6 +169,7 @@ export function sourceFiles(layout: Layout, from: string): string[] {
 const outputExt = (ext: string) => (ext === ".pot" ? ".po" : ext);
 
 export function targetFile(layout: Layout, from: string, to: string, src: string): string {
+  if (layout.kind === "android") return path.join(layout.root, `values-${androidQualifier(to)}`, "strings.xml");
   if (layout.kind === "file") return path.join(layout.root, fileNameFor(layout, to, outputExt(layout.ext!)));
   const rel = path.relative(path.join(layout.root, dirNameFor(layout, from)), src);
   const ext = path.extname(rel);
@@ -157,6 +188,14 @@ function looksLikeLocale(tag: string): boolean {
 
 /** Locale tags already translated alongside `from` in this layout (for `locale-ai check`). */
 export function existingTargets(layout: Layout, from: string): string[] {
+  if (layout.kind === "android") {
+    return fs
+      .readdirSync(layout.root, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && /^values-/.test(e.name) && isFile(path.join(layout.root, e.name, "strings.xml")))
+      .map((e) => tagFromAndroidQualifier(e.name.slice("values-".length)))
+      .filter((tag): tag is string => tag !== undefined && tag !== from)
+      .sort();
+  }
   if (layout.kind === "file") {
     const ext = layout.ext!;
     const prefix = layout.prefix ? `${layout.prefix}_` : "";
@@ -320,6 +359,122 @@ function readStringsDoc(file: string, text: string): LocaleDoc {
       blocks.push(`"${escapeC(k)}" = "${escapeC(obj[k] as string)}";`);
     }
     return withNewline(blocks.join("\n\n"), keepNewline);
+  };
+  return { data, serialize };
+}
+
+/** Android's `&entity;` plus its own backslash escapes (`\'`, `\"`, `\n`, `\t`) and `<![CDATA[...]]>`. */
+function unescapeAndroidXml(s: string): string {
+  return s
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, (_m, inner: string) => inner)
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/\\(.)/g, (_m, c: string) => ({ n: "\n", t: "\t" })[c] ?? c);
+}
+function escapeAndroidXml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\t/g, "\\t");
+}
+
+interface AndroidEntry {
+  comment?: string;
+  name: string;
+  translatable: boolean;
+  kind: "string" | "array" | "plural";
+}
+
+/**
+ * Android `strings.xml`: `<string>`/`<string-array>`/`<plurals>` elements under a
+ * single `<resources>` root, each optionally preceded by an `<!-- ... -->` translator
+ * comment and marked `translatable="false"` for text that must stay verbatim (an app ID,
+ * a format string nobody localizes). A `<plurals>` element's `quantity="one|other|..."`
+ * items become a nested one/other/... object — the same shape Rails-style nested
+ * plurals use, so `addNestedPluralForms` fills in whatever categories the target
+ * language needs with zero format-specific code.
+ *
+ * This is a simpler round-trip than YAML/.po/.strings: comments are kept from the
+ * source on first write, but a rerun regenerates the whole file from `data` rather
+ * than editing an existing target in place (so a translator's own XML comment edits in
+ * an already-translated file won't survive a rerun) — the same level of fidelity ARB
+ * already has in this project.
+ */
+function readAndroidXmlDoc(file: string, text: string): LocaleDoc {
+  const openMatch = /<resources\b[^>]*>/.exec(text);
+  const closeMatch = /<\/resources>/.exec(text);
+  if (!openMatch || !closeMatch) throw new Error(`Invalid Android strings.xml in ${file}: missing a <resources> element.`);
+  const before = text.slice(0, openMatch.index + openMatch[0].length);
+  const after = text.slice(closeMatch.index);
+  const body = text.slice(openMatch.index + openMatch[0].length, closeMatch.index);
+
+  const data = newObj();
+  const entries: AndroidEntry[] = [];
+  const elementRe = /(?:(<!--[\s\S]*?-->)\s*\r?\n\s*)?<(string-array|string|plurals)\b([^>]*)(?:\/>|>([\s\S]*?)<\/\2>)/g;
+  for (const m of body.matchAll(elementRe)) {
+    const [, comment, tag, attrsRaw, inner] = m;
+    const nameMatch = /\bname="([^"]*)"/.exec(attrsRaw);
+    if (!nameMatch) continue;
+    const name = unescapeAndroidXml(nameMatch[1]);
+    const translatable = !/\btranslatable\s*=\s*"false"/.test(attrsRaw);
+    if (tag === "string") {
+      entries.push({ comment, name, translatable, kind: "string" });
+      if (translatable) data[name] = unescapeAndroidXml((inner ?? "").trim());
+    } else if (tag === "string-array") {
+      entries.push({ comment, name, translatable, kind: "array" });
+      const items = [...(inner ?? "").matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/g)].map((im) => unescapeAndroidXml(im[1].trim()));
+      if (translatable) data[name] = items;
+    } else {
+      entries.push({ comment, name, translatable, kind: "plural" });
+      if (translatable) {
+        const plural = newObj();
+        for (const im of (inner ?? "").matchAll(/<item\s+quantity="(\w+)"[^>]*>([\s\S]*?)<\/item>/g)) {
+          plural[im[1]] = unescapeAndroidXml(im[2].trim());
+        }
+        data[name] = plural;
+      }
+    }
+  }
+  if (entries.length === 0 && body.trim() !== "") {
+    throw new Error(`No <string>/<string-array>/<plurals> entries found in ${file}`);
+  }
+  const indent = /\r?\n([ \t]+)</.exec(body)?.[1] ?? "    ";
+  const keepNewline = finalNewline(text);
+  const raw = newObj();
+  for (const m of body.matchAll(elementRe)) raw[/\bname="([^"]*)"/.exec(m[3])![1]] = m[0];
+
+  const serialize = (d: unknown): string => {
+    const obj = isObj(d) ? d : newObj();
+    const blocks: string[] = [];
+    for (const e of entries) {
+      const attr = e.translatable ? "" : ' translatable="false"';
+      let tag: string;
+      if (!e.translatable) {
+        tag = (raw[e.name] as string).replace(/^<!--[\s\S]*?-->\s*\r?\n\s*/, "");
+      } else if (e.kind === "string") {
+        const v = typeof obj[e.name] === "string" ? (obj[e.name] as string) : "";
+        tag = `<string name="${escapeAndroidXml(e.name)}"${attr}>${escapeAndroidXml(v)}</string>`;
+      } else if (e.kind === "array") {
+        const items = Array.isArray(obj[e.name]) ? (obj[e.name] as unknown[]) : [];
+        const lines = items.map((v) => `${indent}${indent}<item>${escapeAndroidXml(typeof v === "string" ? v : "")}</item>`);
+        tag = `<string-array name="${escapeAndroidXml(e.name)}"${attr}>\n${lines.join("\n")}\n${indent}</string-array>`;
+      } else {
+        const plural = isObj(obj[e.name]) ? (obj[e.name] as Obj) : newObj();
+        const lines = CATEGORIES.filter((c) => typeof plural[c] === "string").map(
+          (c) => `${indent}${indent}<item quantity="${c}">${escapeAndroidXml(plural[c] as string)}</item>`,
+        );
+        tag = `<plurals name="${escapeAndroidXml(e.name)}"${attr}>\n${lines.join("\n")}\n${indent}</plurals>`;
+      }
+      blocks.push(e.comment ? `${indent}${e.comment}\n${indent}${tag}` : `${indent}${tag}`);
+    }
+    return withNewline(`${before}\n${blocks.join("\n")}\n${after}`, keepNewline);
   };
   return { data, serialize };
 }
@@ -622,6 +777,7 @@ export function readLocaleDoc(file: string, tag: string, isSource = false, fuzzy
   if (ext === ".po" || ext === ".pot") return readPoDoc(file, text, isSource, fuzzy);
   if (ext === ".arb") return readArbDoc(file, text);
   if (ext === ".strings") return readStringsDoc(file, text);
+  if (ext === ".xml") return readAndroidXmlDoc(file, text);
   return readJsonDoc(file, text);
 }
 

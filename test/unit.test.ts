@@ -331,6 +331,95 @@ test("Apple's <locale>.lproj directory suffix is detected, auto and via --input"
   assert.deepEqual(direct, { kind: "dir", root, dirSuffix: ".lproj" });
 });
 
+test("Android's values/values-<qualifier> resource folders are detected, auto and via --input", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-android-"));
+  fs.mkdirSync(path.join(root, "app/src/main/res/values"), { recursive: true });
+  fs.mkdirSync(path.join(root, "app/src/main/res/values-pt-rBR"), { recursive: true });
+  fs.writeFileSync(path.join(root, "app/src/main/res/values/strings.xml"), "<resources>\n    <string name=\"hi\">Hi</string>\n</resources>\n");
+  fs.writeFileSync(
+    path.join(root, "app/src/main/res/values-pt-rBR/strings.xml"),
+    '<resources>\n    <string name="hi">Oi</string>\n</resources>\n',
+  );
+  const resRoot = path.join(root, "app/src/main/res");
+
+  const l = detectLayout(root, "en");
+  assert.deepEqual(l, { kind: "android", root: resRoot });
+  assert.deepEqual(existingTargets(l, "en"), ["pt-BR"]);
+  const files = sourceFiles(l, "en");
+  assert.deepEqual(files, [path.join(resRoot, "values/strings.xml")]);
+  assert.equal(targetFile(l, "en", "fr", files[0]), path.join(resRoot, "values-fr/strings.xml"));
+  assert.equal(targetFile(l, "en", "pt-BR", files[0]), path.join(resRoot, "values-pt-rBR/strings.xml"));
+
+  // Pointing --input directly at the values directory also resolves it.
+  const direct = detectLayout(root, "en", path.join(resRoot, "values"));
+  assert.deepEqual(direct, { kind: "android", root: resRoot });
+});
+
+test("Android strings.xml: strings, arrays, plurals, translatable=false and escaping round-trip", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-android-xml-"));
+  const file = path.join(dir, "strings.xml");
+  const text = `<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The app's own name, never translated -->
+    <string name="app_name" translatable="false">MyApp</string>
+    <!-- Shown on the welcome screen -->
+    <string name="welcome_title">Welcome, %1$s!</string>
+    <string-array name="colors">
+        <item>Red</item>
+        <item>Green</item>
+    </string-array>
+    <plurals name="item_count">
+        <item quantity="one">%d item</item>
+        <item quantity="other">%d items</item>
+    </plurals>
+    <string name="escaping_test">It&apos;s a &quot;test&quot; &amp; more</string>
+</resources>
+`;
+  fs.writeFileSync(file, text);
+  const doc = readLocaleDoc(file, "en", true, false);
+  assert.equal(JSON.stringify(doc.data), JSON.stringify({
+    welcome_title: "Welcome, %1$s!",
+    colors: ["Red", "Green"],
+    item_count: { one: "%d item", other: "%d items" },
+    escaping_test: 'It\'s a "test" & more',
+  }));
+
+  const out = doc.serialize(
+    {
+      welcome_title: "Bienvenue, %1$s !",
+      colors: ["Rouge", "Vert"],
+      item_count: { one: "%d article", other: "%d articles" },
+      escaping_test: 'C\'est un "test" & plus',
+    },
+    "fr",
+  );
+  assert.equal(
+    out,
+    `<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The app's own name, never translated -->
+    <string name="app_name" translatable="false">MyApp</string>
+    <!-- Shown on the welcome screen -->
+    <string name="welcome_title">Bienvenue, %1$s !</string>
+    <string-array name="colors">
+        <item>Rouge</item>
+        <item>Vert</item>
+    </string-array>
+    <plurals name="item_count">
+        <item quantity="one">%d article</item>
+        <item quantity="other">%d articles</item>
+    </plurals>
+    <string name="escaping_test">C\\'est un \\"test\\" &amp; plus</string>
+</resources>
+`,
+  );
+
+  // addNestedPluralForms reuses the Rails-style nested-plural machinery unchanged.
+  const withMissing = addNestedPluralForms(doc.data, "ar");
+  assert.equal(withMissing.added, 4);
+  assert.deepEqual(Object.keys(withMissing.doc as Record<string, unknown>).includes("item_count"), true);
+});
+
 test("flattenStrings: key paths for nested objects and arrays", () => {
   assert.deepEqual(flattenStrings({ a: "x", b: { c: "y" }, d: ["p", "q"] }), [
     { path: "a", value: "x" },
