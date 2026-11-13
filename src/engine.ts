@@ -295,7 +295,10 @@ const COUNT_PLACEHOLDER = /\{\{\s*count\s*\}\}/;
  * came back "Vous avez {{count}} fichiers"). Retranslating with a literal "1" in place of
  * {{count}} gives the model the real grammatical cue; only applied when {{count}} is the
  * string's only placeholder (anything else needs the normal masking pipeline to survive),
- * and only kept when the "1" survives translation intact enough to restore {{count}}.
+ * and only kept when exactly one standalone "1" survives translation — a source string that
+ * already had its own unrelated literal "1" ("{{count}} of 1 total") would otherwise risk
+ * restoring the wrong occurrence if translation reordered the two, silently freezing the
+ * actual count as a literal "1" and corrupting the unrelated one into {{count}} instead.
  *
  * All qualifying keys are retranslated in one `runModels` call (which itself batches by
  * `opts.batchSize`), not one model call per key — a project with hundreds of plural keys
@@ -324,9 +327,10 @@ async function fixSingularGrammar(
     const out = outputs.get(prepared) ?? "";
     if (isDegenerate(pinned, out)) continue;
     const post = postprocess(pinned, out, opts.targetLang);
-    const restored = /(?<![\d.])1(?![\d.])/.exec(post);
-    if (!restored) continue; // can't confirm the "1" survived: keep the original translation
-    translations.set(s, post.slice(0, restored.index) + marker + post.slice(restored.index + 1));
+    const matches = [...post.matchAll(/(?<![\d.])1(?![\d.])/g)];
+    if (matches.length !== 1) continue; // no match, or ambiguous: keep the original translation
+    const restored = matches[0];
+    translations.set(s, post.slice(0, restored.index) + marker + post.slice(restored.index! + 1));
   }
 }
 

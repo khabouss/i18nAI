@@ -682,13 +682,34 @@ interface AndroidEntry {
  * an already-translated file won't survive a rerun) — the same level of fidelity ARB
  * already has in this project.
  */
+/**
+ * A `<!-- ... -->` block directly followed by a real `<string>`/`<string-array>`/`<plurals>`
+ * tag is captured by `elementRe` below as that element's own translator comment — but one
+ * NOT followed by a real tag (a standalone note, or several comments stacked together) isn't,
+ * and the regex would otherwise keep scanning character by character into the comment's own
+ * text and match any `<string ...>...</string>`-shaped text inside it as if it were live
+ * content. Blanking out (same length, newlines kept so later indent detection is unaffected)
+ * every comment that isn't immediately attached to a following element closes that gap.
+ */
+function blankOrphanComments(body: string): string {
+  let out = body;
+  for (const m of body.matchAll(/<!--[\s\S]*?-->/g)) {
+    const start = m.index!;
+    const end = start + m[0].length;
+    if (/^\s*\r?\n\s*<(?:string-array|string|plurals)\b/.test(body.slice(end))) continue;
+    out = out.slice(0, start) + m[0].replace(/[^\n\r]/g, " ") + out.slice(end);
+  }
+  return out;
+}
+
 function readAndroidXmlDoc(file: string, text: string): LocaleDoc {
   const openMatch = /<resources\b[^>]*>/.exec(text);
   const closeMatch = /<\/resources>/.exec(text);
   if (!openMatch || !closeMatch) throw new Error(`Invalid Android strings.xml in ${file}: missing a <resources> element.`);
   const before = text.slice(0, openMatch.index + openMatch[0].length);
   const after = text.slice(closeMatch.index);
-  const body = text.slice(openMatch.index + openMatch[0].length, closeMatch.index);
+  const rawBody = text.slice(openMatch.index + openMatch[0].length, closeMatch.index);
+  const body = blankOrphanComments(rawBody);
 
   const data = newObj();
   const entries: AndroidEntry[] = [];
@@ -698,7 +719,7 @@ function readAndroidXmlDoc(file: string, text: string): LocaleDoc {
     const nameMatch = /\bname="([^"]*)"/.exec(attrsRaw);
     if (!nameMatch) continue;
     const name = unescapeAndroidXml(nameMatch[1]);
-    const translatable = !/\btranslatable\s*=\s*"false"/.test(attrsRaw);
+    const translatable = !/\btranslatable\s*=\s*["']false["']/.test(attrsRaw);
     if (tag === "string") {
       const trimmed = (inner ?? "").trim();
       const quoted = trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"');
@@ -820,8 +841,12 @@ function parseXliffUnits(text: string): { segments: XliffSegment[]; units: Xliff
     if (!idMatch || !sourceMatch) {
       segments.push({ text: whole });
     } else {
-      const targetMatch = /<target\b[^>]*>([\s\S]*?)<\/target>/.exec(inner);
-      const translatable = !/\btranslate\s*=\s*"no"/.test(attrsRaw) && !/<(?:bpt|ept)\b/.test(sourceMatch[1]);
+      // A self-closing `<target/>` (some CAT tools emit one as a placeholder before any
+      // translation exists) must still be captured as `targetWhole` — matched only by the
+      // alternative with no capture group, so `targetInner` stays undefined — or serialize
+      // below has no span to replace in place and inserts a second, duplicate `<target>`.
+      const targetMatch = /<target\b[^>]*\/>|<target\b[^>]*>([\s\S]*?)<\/target>/.exec(inner);
+      const translatable = !/\btranslate\s*=\s*["']no["']/.test(attrsRaw) && !/<(?:bpt|ept)\b/.test(sourceMatch[1]);
       const lineIndent = /[ \t]*$/.exec(before)![0];
       units.push({
         id: unescapeXml(idMatch[1]),
