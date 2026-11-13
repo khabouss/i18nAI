@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -208,7 +209,7 @@ test("pendingStrings/buildTarget: isStale forces re-translation of a non-empty t
 test("lock: a source edit is detected as stale; a translator edit is flagged, not stale; per-locale, not shared", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-lock-"));
   const file = path.join(dir, "locale-ai.lock.json");
-  assert.deepEqual(loadLock(file), { version: 2, files: {} });
+  assert.deepEqual(loadLock(file), { version: 3, entries: {} });
 
   const lock = loadLock(file);
   recordEntries(lock, "en.json", "fr", [{ path: "welcome", source: "Welcome back!", written: "Bon retour !" }]);
@@ -251,13 +252,17 @@ test("lock: a source edit is detected as stale; a translator edit is flagged, no
 test("lock: a pre-0.7.0 (version 1) lock file is migrated in memory, never crashes a run", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-lock-v1-"));
   const file = path.join(dir, "locale-ai.lock.json");
+  // Pre-0.7.0 actually stored 16-character hashes; the migration truncates them to the
+  // 8 characters `hashOf` produces today, so this fixture deliberately doesn't reuse
+  // `hashOf` itself (which would already be 8 characters and not exercise the migration).
+  const hash16 = (s: string) => crypto.createHash("sha256").update(s, "utf8").digest("hex").slice(0, 16);
   const v1 = {
     version: 1,
-    files: { "en.json": { welcome: { source: hashOf("Welcome back!"), mt: { fr: hashOf("Bon retour !") } } } },
+    files: { "en.json": { welcome: { source: hash16("Welcome back!"), mt: { fr: hash16("Bon retour !") } } } },
   };
   fs.writeFileSync(file, JSON.stringify(v1));
   const lock = loadLock(file);
-  assert.equal(lock.version, 2);
+  assert.equal(lock.version, 3);
   assert.equal(isSourceStale(lock, "en.json", "welcome", "fr", "Welcome back!"), false);
   assert.equal(isEdited(lock, "en.json", "welcome", "fr", "Bon retour !"), false);
   assert.equal(isEdited(lock, "en.json", "welcome", "fr", "Something else entirely"), true);
@@ -1004,6 +1009,13 @@ test("XLIFF 1.2: inline <x>/<g> markup survives translation like any other prote
   assert.match(out2, /<target>Salut !<\/target>/);
   assert.match(out2, /<context-group purpose="location">/);
   assert.equal([...out2.matchAll(/<target[ >]/g)].length, 1);
+
+  // Unchanged text: the <target> element (attributes included — a CAT tool's own
+  // state="translated"/"final") is left completely alone, not replaced with a fresh,
+  // attribute-less one, even though this run "translated" (i.e. reproduced) nothing.
+  const doc3 = readLocaleDoc(withTarget, "en", true);
+  const out3 = doc3.serialize({ greeting: "Salut (ancien) !" }, "fr");
+  assert.match(out3, /<target state="translated">Salut \(ancien\) !<\/target>/);
 });
 
 test("JS/TS locale modules: export default/module.exports, comments, nesting, arrays, quote/indent style kept; unsupported syntax fails clearly", () => {
@@ -1072,6 +1084,39 @@ export default {
   const indirect = path.join(root, "indirect.ts");
   fs.writeFileSync(indirect, 'const en = {\n  greeting: "Hi",\n};\nexport default en;\n');
   assert.throws(() => readLocaleDoc(indirect, "en", true), /must be a plain object literal/);
+});
+
+test("JS/TS locale modules: a same-line trailing comment stays attached to its own key, not the next one", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-js-trailing-"));
+  const file = path.join(root, "en.js");
+  fs.writeFileSync(
+    file,
+    `export default {
+  home: 'Home', // inline note
+  greeting: 'Hello',
+  /* block form */
+  cancel: 'Cancel', /* also inline */
+  bye: 'Bye',
+};
+`,
+  );
+  const doc = readLocaleDoc(file, "en", true);
+  assert.equal(
+    JSON.stringify(doc.data),
+    JSON.stringify({ home: "Home", greeting: "Hello", cancel: "Cancel", bye: "Bye" }),
+  );
+  const out = doc.serialize({ home: "Accueil", greeting: "Bonjour", cancel: "Annuler", bye: "Au revoir" });
+  assert.equal(
+    out,
+    `export default {
+  home: 'Accueil', // inline note
+  greeting: 'Bonjour',
+  /* block form */
+  cancel: 'Annuler', /* also inline */
+  bye: 'Au revoir',
+};
+`,
+  );
 });
 
 test(".NET .resx: detection (untagged default, dot-separated culture target), resheaders/comments kept, binary resources never touched", () => {
