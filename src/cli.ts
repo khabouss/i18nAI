@@ -15,40 +15,12 @@ import {
   type Hop,
   type ModelEntry,
 } from "./catalog.ts";
-import { translateStrings, type Issue } from "./engine.ts";
-import { CONFIG_FILE, glossaryLookup, loadConfig, protectRegex, type ProjectConfig } from "./glossary.ts";
-import { intlCode, parseLocale, type Locale } from "./lang.ts";
-import { editedPaths, isEdited, isSourceStale, LOCK_FILENAME, loadLock, pruneDeletedKeys, recordEntries, saveLock, type LockFile } from "./lock.ts";
-import {
-  addNestedPluralForms,
-  addPluralForms,
-  buildTarget,
-  detectLayout,
-  existingTargets,
-  flattenStrings,
-  keyPathProtect,
-  pendingStrings,
-  pluralOneStrings,
-  readLocaleDoc,
-  sourceFiles,
-  targetFile,
-  translatedPaths,
-  usesI18nextPlurals,
-  type LocaleDoc,
-} from "./locales.ts";
-import {
-  cacheRoot,
-  install,
-  isInstalled,
-  loadTranslator,
-  localModelProblem,
-  planInstall,
-  readManifest,
-  uninstall,
-  type InstallPlan,
-  type Translator,
-} from "./models.ts";
-import { hasTranslatableText, mask } from "./placeholders.ts";
+import { check, translate } from "./api.ts";
+import { CONFIG_FILE, loadConfig, type ProjectConfig } from "./glossary.ts";
+import { parseLocale } from "./lang.ts";
+import { isEdited, LOCK_FILENAME, loadLock, recordEntries, saveLock } from "./lock.ts";
+import { detectLayout, existingTargets, flattenStrings, readLocaleDoc, sourceFiles, targetFile } from "./locales.ts";
+import { cacheRoot, install, isInstalled, localModelProblem, planInstall, readManifest, uninstall, type InstallPlan } from "./models.ts";
 
 /** Read from package.json so `npm version` is the single source of truth. */
 const VERSION: string = JSON.parse(
@@ -115,23 +87,6 @@ const rel = (p: string) => path.relative(process.cwd(), p) || ".";
  * from a subdirectory with a relative `--input`.
  */
 const fileKey = (p: string, base: string) => path.relative(base, p).split(path.sep).join("/");
-
-/**
- * True when `path`'s source has changed for `targetTag` since it was last
- * translated (see lock.ts's `isSourceStale`) AND the existing target text at
- * that path wasn't itself hand-edited since this tool last wrote it. An edit
- * always wins over staleness — a source change alone is never allowed to
- * silently clobber a translator's edit; `--overwrite` is the only way past
- * both at once.
- */
-function staleNotEdited(lock: LockFile, lockKey: string, existing: unknown, targetTag: string): (p: string, s: string) => boolean {
-  const existingFlat = new Map(flattenStrings(existing).map((e) => [e.path, e.value]));
-  return (p, s) => {
-    if (!isSourceStale(lock, lockKey, p, targetTag, s)) return false;
-    const current = existingFlat.get(p);
-    return current === undefined || !isEdited(lock, lockKey, p, targetTag, current);
-  };
-}
 
 /**
  * `Number("abc")` is NaN, and NaN silently poisons everything downstream (an
@@ -208,21 +163,12 @@ async function ensureInstalled(models: ModelEntry[], yes: boolean): Promise<void
   }
 }
 
-interface FileJob {
-  source: string;
-  target: string;
-  doc: LocaleDoc;
-  existing: unknown;
-  pending: string[];
-}
-
-interface TargetJob {
-  locale: Locale;
-  route: Hop[];
-  files: FileJob[];
-  unique: number;
-}
-
+/**
+ * Thin CLI wrapper around `translate()` (src/api.ts): parses argv, turns every
+ * progress/status event the core pipeline emits back into the same terminal output
+ * this command has always produced, and prints the final summary. The core itself
+ * never touches stdout/stderr or prompts — see api.ts for the actual pipeline.
+ */
 async function cmdTranslate(argv: string[]): Promise<number> {
   const { values } = parseArgs({
     args: argv,
@@ -242,218 +188,102 @@ async function cmdTranslate(argv: string[]): Promise<number> {
     },
   });
   if (!values.to) throw new Error("Missing --to. Example: locale-ai translate --from en --to fr,es");
-  const from = parseLocale(values.from!);
-  const targets = values.to.split(",").map((t) => t.trim()).filter(Boolean).map(parseLocale);
+  const fromTag = parseLocale(values.from!).tag;
   const batchSize = positiveInt(values["batch-size"], "batch-size");
   const beams = positiveInt(values.beams, "beams", values.fast ? 1 : 4);
 
-  const config = loadConfig(process.cwd(), values.config);
-  const catalog = catalogFor(config);
-  const protect = protectRegex(config);
-  const isProtectedKey = keyPathProtect(config.doNotTranslateKeys);
-  const layout = detectLayout(process.cwd(), from.tag, values.input);
-  const lockDir = config.configFile ? path.dirname(config.configFile) : layout.root;
-  const lockPath = path.resolve(lockDir, LOCK_FILENAME);
-  const lockExisted = fs.existsSync(lockPath);
-  const lock = loadLock(lockPath);
-  const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag, true, values.fuzzy!) }));
-  const singularHints = new Set(sources.flatMap(({ doc }) => [...pluralOneStrings(doc.data)]));
   log(`locale-ai ${VERSION}`);
-  log(
-    layout.kind === "xcstrings"
-      ? `Found ${from.tag} strings in ${rel(layout.file!)}`
-      : `Found ${sources.length} ${from.tag} file${sources.length === 1 ? "" : "s"} in ${rel(layout.root)}/` +
-          (layout.kind === "dir" ? `${from.tag}${layout.dirSuffix ?? ""}/` : ""),
-  );
-
-  let failures = 0;
-  const jobs: TargetJob[] = [];
-  for (const locale of targets) {
-    const route = resolveRoute(from, locale, catalog);
-    if (!route) {
-      failures++;
-      const options = reachableTargets(from.lang, catalog);
-      log(`✗ ${locale.tag}: no local model for ${from.lang} → ${locale.lang}.`);
-      log(`  Available from ${from.lang}: ${options.join(", ") || "(none)"}`);
-      continue;
-    }
-    const files = sources.map(({ file, doc }): FileJob => {
-      const target = targetFile(layout, from.tag, locale.tag, file);
-      const existing = fs.existsSync(target) ? readLocaleDoc(target, locale.tag).data : undefined;
-      const isStale = staleNotEdited(lock, fileKey(file, lockDir), existing, locale.tag);
-      return {
-        source: file,
-        target,
-        doc,
-        existing,
-        pending: pendingStrings(doc.data, existing, values.overwrite!, isProtectedKey, isStale),
-      };
-    });
-    const unique = new Set(files.flatMap((f) => f.pending)).size;
-    jobs.push({ locale, route, files, unique });
-  }
-
-  if (values["dry-run"]) {
-    for (const j of jobs) {
-      const models = j.route
-        .map((h) => `${h.model.id}${isInstalled(h.model) ? "" : " (not installed)"}`)
-        .join(" → ");
-      log(`${j.locale.tag.padEnd(8)} ${String(j.unique).padStart(5)} strings to translate   model: ${models}`);
-      for (const f of j.files) if (f.pending.length) log(`         ${rel(f.target)}  +${f.pending.length}`);
-    }
-    return failures ? 1 : 0;
-  }
-
-  const active = jobs.filter((j) => j.unique > 0);
-  await ensureInstalled(
-    active.flatMap((j) => j.route.map((h) => h.model)),
-    values.yes!,
-  );
-
-  const allIssues: Array<Issue & { locale: string }> = [];
-  const loaded = new Map<string, Translator>();
-  const key = (h: Hop) => `${h.model.id}|${h.prefix ?? ""}`;
-  const remainingUses = (repoKey: string, from: number) =>
-    active.slice(from).filter((j) => j.route.some((h) => key(h) === repoKey)).length;
-
-  for (const job of jobs) {
-    const started = Date.now();
-    let translations = new Map<string, string>();
-    // Sources whose only result was the last-resort placeholder-fallback path this run —
-    // a degraded, best-effort output, not a real translation. Excluded from what gets
-    // recorded as "done" below so they stay pending and get retried (and still flagged
-    // for review) on the next run, instead of being locked in forever.
-    let unresolved = new Set<string>();
-    if (job.unique > 0) {
-      const translators: Translator[] = [];
-      for (const hop of job.route) {
-        if (!loaded.has(key(hop))) {
-          status(`${job.locale.tag}: loading ${hop.model.id}...`);
-          loaded.set(key(hop), await loadTranslator(hop, { beams }));
+  const result = await translate({
+    cwd: process.cwd(),
+    from: values.from,
+    to: values.to.split(",").map((t) => t.trim()).filter(Boolean),
+    input: values.input,
+    overwrite: values.overwrite,
+    dryRun: values["dry-run"],
+    fast: values.fast,
+    beams,
+    batchSize,
+    fuzzy: values.fuzzy,
+    config: values.config,
+    yes: values.yes,
+    confirmDownload: async (plans, totalBytes) => {
+      log("Models to download (one time, then cached for every project):");
+      for (const p of plans) log(`  ${p.modelId.padEnd(12)} ${mb(p.bytes).padStart(7)}  ${p.source}`);
+      if (!(await confirm(`Download ${mb(totalBytes)}?`, false))) throw new Error("Download declined.");
+      return true;
+    },
+    onEvent: (e) => {
+      switch (e.type) {
+        case "found":
+          log(
+            e.layout.kind === "xcstrings"
+              ? `Found ${e.fromTag} strings in ${rel(e.layout.file!)}`
+              : `Found ${e.fileCount} ${e.fromTag} file${e.fileCount === 1 ? "" : "s"} in ${rel(e.layout.root)}/` +
+                  (e.layout.kind === "dir" ? `${e.fromTag}${e.layout.dirSuffix ?? ""}/` : ""),
+          );
+          break;
+        case "route-missing":
+          log(`✗ ${e.locale}: no local model for ${e.sourceLang} → ${e.targetLang}.`);
+          log(`  Available from ${e.sourceLang}: ${e.available.join(", ") || "(none)"}`);
+          break;
+        case "dry-run-locale": {
+          const models = e.models.map((m) => `${m.id}${m.installed ? "" : " (not installed)"}`).join(" → ");
+          log(`${e.locale.padEnd(8)} ${String(e.pending).padStart(5)} strings to translate   model: ${models}`);
+          for (const f of e.files) log(`         ${rel(f.target)}  +${f.pending}`);
+          break;
         }
-        translators.push(loaded.get(key(hop))!);
-      }
-      const strings = job.files.flatMap((f) => f.pending);
-      const result = await translateStrings(strings, translators, {
-        sourceLang: intlCode(from),
-        targetLang: intlCode(job.locale),
-        batchSize,
-        protect,
-        lookup: glossaryLookup(from, job.locale, config),
-        singularHints,
-        onProgress: makeProgress((d, t) => `${job.locale.tag}: translating ${bar(d, t)} ${d}/${t}`),
-      });
-      endStatus();
-      translations = result.translations;
-      unresolved = new Set(result.issues.filter((i) => i.kind === "placeholder-fallback").map((i) => i.source));
-      allIssues.push(...result.issues.map((i) => ({ ...i, locale: job.locale.tag })));
-      for (const hop of job.route) {
-        const k = key(hop);
-        if (remainingUses(k, active.indexOf(job) + 1) === 0 && loaded.has(k)) {
-          await loaded.get(k)!.dispose();
-          loaded.delete(k);
+        case "checking-models":
+          status("Checking model sizes...");
+          break;
+        case "download-plan":
+          endStatus();
+          break;
+        case "download-progress":
+          status(`Downloading ${e.modelId} ${bar(e.done, e.total)} ${mb(e.done)}/${mb(e.total)}`);
+          break;
+        case "download-done":
+          endStatus();
+          log(`✓ Installed ${e.modelId}`);
+          break;
+        case "loading-model":
+          status(`${e.locale}: loading ${e.modelId}...`);
+          break;
+        case "translate-progress":
+          status(`${e.locale}: translating ${bar(e.done, e.total)} ${e.done}/${e.total}`);
+          break;
+        case "locale-done": {
+          endStatus();
+          const secs = (e.durationMs / 1000).toFixed(1);
+          const via = e.route.length > 1 ? ` (via ${e.route.join(" → ")})` : "";
+          log(
+            `✓ ${e.locale.padEnd(7)} ${String(e.stringsTranslated).padStart(5)} strings translated, ${e.filesWritten} file${e.filesWritten === 1 ? "" : "s"} written in ${secs}s${via}` +
+              (e.pluralsAdded ? `, ${e.pluralsAdded} plural forms added` : "") +
+              (e.issues ? `, ${e.issues} to review` : ""),
+          );
+          break;
         }
       }
-    }
+    },
+  });
 
-    let written = 0;
-    let pluralsAdded = 0;
-    for (const f of job.files) {
-      const lockKey = fileKey(f.source, lockDir);
-      const srcFlat = flattenStrings(f.doc.data);
-      const srcPaths = new Set(srcFlat.map((e) => e.path));
-      const isStale = staleNotEdited(lock, lockKey, f.existing, job.locale.tag);
-      if (f.existing !== undefined) {
-        const srcByPath = new Map(srcFlat.map((e) => [e.path, e.value]));
-        // A plural-derived path (no real source counterpart) is reported by the dedicated
-        // plural-sync pass below instead, which — unlike this generic sweep — actually
-        // knows whether the "other" it's derived from changed, so it can tell "edited"
-        // from "conflict" correctly instead of only ever reporting "edited" here.
-        for (const editedPath of editedPaths(lock, lockKey, job.locale.tag, flattenStrings(f.existing))) {
-          if (!srcPaths.has(editedPath)) continue;
-          const srcVal = srcByPath.get(editedPath);
-          const alsoStale = srcVal !== undefined && isSourceStale(lock, lockKey, editedPath, job.locale.tag, srcVal);
-          allIssues.push({ source: editedPath, kind: alsoStale ? "conflict" : "edited", locale: job.locale.tag });
-        }
-      }
-      const built = buildTarget(f.doc.data, f.existing, (s) => translations.get(s) ?? s, values.overwrite!, isProtectedKey, isStale);
-      const translatedSet = new Set(translatedPaths(f.doc.data, f.existing, values.overwrite!, isProtectedKey, isStale));
-      // A plural group's derived zero/two/few/many siblings only exist in the target, never
-      // the source, so the lock can't track them by source-hash the normal way — resync
-      // them whenever the group's "other" sibling was itself just (re)translated, and treat
-      // a hand edit on one of them exactly like a hand edit anywhere else (see lock.ts).
-      const pluralOpts = {
-        otherStale: (p: string) => translatedSet.has(p),
-        isEdited: (p: string, v: string) => isEdited(lock, lockKey, p, job.locale.tag, v),
-        hasSource: (p: string) => srcPaths.has(p),
-      };
-      const i18next = usesI18nextPlurals(f.source)
-        ? addPluralForms(built, intlCode(job.locale), pluralOpts)
-        : { doc: built, added: 0, derived: [], edited: [] };
-      const nested = addNestedPluralForms(i18next.doc, intlCode(job.locale), pluralOpts);
-      const plural = { doc: nested.doc, added: i18next.added + nested.added };
-      const pluralDerived = [...i18next.derived, ...nested.derived];
-      const pluralEdited = [...i18next.edited, ...nested.edited];
-      pluralsAdded += plural.added;
-      for (const { path: p, conflict } of pluralEdited) {
-        allIssues.push({ source: p, kind: conflict ? "conflict" : "edited", locale: job.locale.tag });
-      }
-      const before = fs.existsSync(f.target) ? fs.readFileSync(f.target, "utf8") : undefined;
-      const text = f.doc.serialize(plural.doc, job.locale.tag, before);
-      if (text !== before) {
-        fs.mkdirSync(path.dirname(f.target), { recursive: true });
-        fs.writeFileSync(f.target, text);
-        written++;
-      }
-      const outFlat = new Map(flattenStrings(plural.doc).map((e) => [e.path, e.value]));
-      recordEntries(
-        lock,
-        lockKey,
-        job.locale.tag,
-        srcFlat
-          .filter(({ path: p, value }) => translatedSet.has(p) && !unresolved.has(value))
-          .map(({ path: p, value }) => ({ path: p, source: value, written: outFlat.get(p) ?? "" })),
-      );
-      recordEntries(lock, lockKey, job.locale.tag, pluralDerived.map(({ path: p, value }) => ({ path: p, source: value, written: value })));
-      // A hand-edited derived path keeps its existing lock entry too, even though this run
-      // didn't touch it — otherwise pruning it here (since it's in neither the source nor
-      // this run's derived list) would un-track it, and the NEXT run, seeing no lock entry
-      // at all, would treat it as never-edited and silently overwrite the hand edit.
-      pruneDeletedKeys(lock, lockKey, [
-        ...srcFlat.map((e) => e.path),
-        ...pluralDerived.map((d) => d.path),
-        ...pluralEdited.map((e) => e.path),
-      ]);
-    }
-    if (jobs.length) saveLock(lockPath, lock); // after every locale, not just at the very end — an interrupted run keeps what it already finished
-    const secs = ((Date.now() - started) / 1000).toFixed(1);
-    const issues = allIssues.filter((i) => i.locale === job.locale.tag).length;
-    const via = job.route.length > 1 ? ` (via ${job.route.map((h) => h.model.id).join(" → ")})` : "";
-    log(
-      `✓ ${job.locale.tag.padEnd(7)} ${String(job.unique).padStart(5)} strings translated, ${written} file${written === 1 ? "" : "s"} written in ${secs}s${via}` +
-        (pluralsAdded ? `, ${pluralsAdded} plural forms added` : "") +
-        (issues ? `, ${issues} to review` : ""),
-    );
-  }
-  for (const t of loaded.values()) await t.dispose();
-  // The lock is already saved after each locale above; this is just the first-run log line.
-  if (jobs.length && !lockExisted) {
-    log(`\nCreated ${rel(lockPath)} — commit it so other runs (and \`locale-ai check\`) see the same history.`);
-  }
+  if (result.dryRun) return result.ok ? 0 : 1;
 
-  if (allIssues.length) {
+  if (result.lockCreated) {
+    log(`\nCreated ${rel(result.lockFile)} — commit it so other runs (and \`locale-ai check\`) see the same history.`);
+  }
+  if (result.issues.length) {
     log();
-    log(`${allIssues.length} string${allIssues.length === 1 ? "" : "s"} worth a quick review:`);
-    for (const i of allIssues.slice(0, 10)) {
+    log(`${result.issues.length} string${result.issues.length === 1 ? "" : "s"} worth a quick review:`);
+    for (const i of result.issues.slice(0, 10)) {
       log(`  [${i.locale}] ${i.kind}: ${JSON.stringify(i.source)}${i.output ? ` → ${JSON.stringify(i.output)}` : ""}`);
     }
-    if (allIssues.length > 10) log(`  ... and ${allIssues.length - 10} more${values.report ? "" : " (use --report <file>)"}`);
+    if (result.issues.length > 10) log(`  ... and ${result.issues.length - 10} more${values.report ? "" : " (use --report <file>)"}`);
   }
   if (values.report) {
-    fs.writeFileSync(values.report, JSON.stringify({ version: VERSION, from: from.tag, issues: allIssues }, null, 2) + "\n");
+    fs.writeFileSync(values.report, JSON.stringify({ version: VERSION, from: fromTag, issues: result.issues }, null, 2) + "\n");
     log(`Report written to ${values.report}`);
   }
-  return failures ? 1 : 0;
+  return result.ok ? 0 : 1;
 }
 
 /** Runs scripts/convert-marian.py and prints the config entry for the new model. */
@@ -572,66 +402,34 @@ async function cmdCheck(argv: string[]): Promise<number> {
       config: { type: "string" },
     },
   });
-  const from = parseLocale(values.from!);
-  const config = loadConfig(process.cwd(), values.config);
-  const layout = detectLayout(process.cwd(), from.tag, values.input);
-  const lockDir = config.configFile ? path.dirname(config.configFile) : layout.root;
-  const lock = loadLock(path.resolve(lockDir, LOCK_FILENAME));
-  const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag, true) }));
-  const targets = existingTargets(layout, from.tag);
-  if (!targets.length) {
-    log(`No translated locales found next to ${from.tag}.`);
+  const fromTag = parseLocale(values.from!).tag;
+  const result = await check({ cwd: process.cwd(), from: values.from, input: values.input, config: values.config });
+  if (!result.locales.length) {
+    log(`No translated locales found next to ${fromTag}.`);
     return 0;
   }
 
-  let problems = 0;
   let identicalTotal = 0;
-  for (const to of targets) {
-    let missing = 0;
-    let mismatched = 0;
-    let identical = 0;
-    let stale = 0;
-    for (const { file, doc } of sources) {
-      const target = targetFile(layout, from.tag, to, file);
-      const lockKey = fileKey(file, lockDir);
-      if (!fs.existsSync(target)) {
-        missing += flattenStrings(doc.data).length;
-        log(`✗ ${to}: ${rel(target)} is missing entirely`);
-        continue;
-      }
-      const srcFlat = flattenStrings(doc.data);
-      const tgtByPath = new Map(flattenStrings(readLocaleDoc(target, to).data).map((e) => [e.path, e.value]));
-      for (const { path: p, value: srcVal } of srcFlat) {
-        const tgtVal = tgtByPath.get(p);
-        if (tgtVal === undefined) {
-          missing++;
-          log(`✗ ${to}: ${rel(target)} missing key "${p}"`);
-          continue;
-        }
-        const srcMasked = mask(srcVal, "natural");
-        const tgtTokens = mask(tgtVal, "natural").tokens.toSorted();
-        if (srcMasked.tokens.toSorted().join("\u0001") !== tgtTokens.join("\u0001")) {
-          mismatched++;
-          log(`✗ ${to}: ${rel(target)} "${p}" placeholders differ: source [${srcMasked.tokens.toSorted().join(", ")}], target [${tgtTokens.join(", ")}]`);
-          continue;
-        }
-        if (isSourceStale(lock, lockKey, p, to, srcVal)) {
-          stale++;
-          log(`✗ ${to}: ${rel(target)} "${p}" is stale — the ${from.tag} source changed since this was last translated`);
-          continue;
-        }
-        if (tgtVal === srcVal && hasTranslatableText(srcMasked.text)) {
-          identical++;
-          log(`⚠ ${to}: ${rel(target)} "${p}" is untouched, identical to the ${from.tag} source`);
-        }
+  for (const loc of result.locales) {
+    for (const issue of result.issues.filter((i) => i.locale === loc.locale)) {
+      const target = rel(issue.target);
+      if (issue.kind === "missing-file") log(`✗ ${loc.locale}: ${target} is missing entirely`);
+      else if (issue.kind === "missing-key") log(`✗ ${loc.locale}: ${target} missing key "${issue.path}"`);
+      else if (issue.kind === "placeholder-mismatch") {
+        log(
+          `✗ ${loc.locale}: ${target} "${issue.path}" placeholders differ: source [${issue.sourcePlaceholders.join(", ")}], target [${issue.targetPlaceholders.join(", ")}]`,
+        );
+      } else if (issue.kind === "stale") {
+        log(`✗ ${loc.locale}: ${target} "${issue.path}" is stale — the ${fromTag} source changed since this was last translated`);
+      } else {
+        log(`⚠ ${loc.locale}: ${target} "${issue.path}" is untouched, identical to the ${fromTag} source`);
       }
     }
-    identicalTotal += identical;
-    if (missing || mismatched || stale) problems++;
-    else log(`✓ ${to}${identical ? ` (${identical} left identical to ${from.tag})` : ""}`);
+    identicalTotal += loc.identical;
+    if (loc.ok) log(`✓ ${loc.locale}${loc.identical ? ` (${loc.identical} left identical to ${fromTag})` : ""}`);
   }
   if (identicalTotal) log(`\n${identicalTotal} string${identicalTotal === 1 ? "" : "s"} left identical to the source — not a failure, but worth a look.`);
-  return problems ? 1 : 0;
+  return result.ok ? 0 : 1;
 }
 
 /**

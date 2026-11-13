@@ -57,7 +57,7 @@ Download 577 MB? (Y/n)
 - **Placeholders are never translated or lost**: `{name}`, `{{count}}`, `%s`, `%1$s`, `%(name)s`, `%{name}`, `${name}`, `:attribute`, `$t(key)`, `@:key`, `<b>…</b>`, `<0>…</0>`, `&nbsp;`, URLs, e-mails, and the `©`/`®`/`™` symbols (no config needed, same as the rest of this list — a model can otherwise drop one on a pivoted, two-hop translation).
 - **ICU MessageFormat**: `{count, plural, one {# file} other {# files}}`, `select`, nesting. Only the text is translated.
 - **i18next plurals**: adds the forms the target language needs (`_few`, `_many` for Arabic, Russian, Polish...), so the app doesn't fall back to the English string — each added form copies the `_other` translation verbatim rather than inflecting it, so review and adjust the wording of `_zero`/`_two`/`_few`/`_many` by hand for languages where those forms use a different noun/adjective form. The `_one` form is translated with its `{{count}}` temporarily replaced by a literal "1", since the model otherwise sometimes picks the target's plural noun form despite the English source being grammatically singular. Rails-style nested plurals (`item:` with `one:`/`other:` children instead of `item_one`/`item_other`) get the same missing-forms treatment — Android's `<plurals>`/`<item quantity="...">` groups and `.xcstrings`' `variations.plural` are the same shape and get it too.
-- **Incremental, and edit-aware**: only missing or changed keys are translated; untouched translations are kept, so re-runs are no-ops. A small `locale-ai.lock.json` — written next to your config file if you have one, otherwise next to the locale files themselves, never wherever you happened to run the command from — remembers a hash of each source string and of the output last written for it, *per target locale* (translating `es` never marks a never-touched `fr` as up to date). Editing a source string gets it re-translated automatically on the next run for every locale (it isn't enough for the target to already hold *some* text); editing a target string by hand is detected and reported for review on every run until resolved, never silently overwritten — and if the source changes too while that hand edit is still pending, it's reported as a **conflict** rather than auto-resolved either way. Run `locale-ai accept [--to <locales>] [key...]` once you've reviewed a hand edit (or several, or all of them) to stop it being reported — it only updates the lock's own record, never the file. `--overwrite` bypasses all of that and re-translates everything, hand edits included. A key removed from the source is dropped from the lock too. The lock file only *tracks* history — `locale-ai check` reads it to fail CI on a translation gone stale, and commiting the lock (like a package lock) is what makes that history consistent across machines and CI. It's a flat, one-line-per-key JSON file with short hashes (not a deep, multi-line-per-field tree), so a 5,000-key, 4-locale project stays small and two translators editing different keys touch different lines instead of colliding on every commit.
+- **Incremental, and edit-aware**: only missing or changed keys are translated; untouched translations are kept, so re-runs are no-ops. A small `locale-ai.lock.json` — written next to your config file if you have one, otherwise next to the locale files themselves, never wherever you happened to run the command from — remembers a hash of each source string and of the output last written for it, *per target locale* (translating `es` never marks a never-touched `fr` as up to date). Editing a source string gets it re-translated automatically on the next run for every locale (it isn't enough for the target to already hold *some* text); editing a target string by hand is detected and reported for review on every run until resolved, never silently overwritten — and if the source changes too while that hand edit is still pending, it's reported as a **conflict** rather than auto-resolved either way. Run `locale-ai accept [--to <locales>] [key...]` once you've reviewed a hand edit (or several, or all of them) to stop it being reported — it only updates the lock's own record, never the file. `--overwrite` bypasses all of that and re-translates everything, hand edits included. A key removed from the source is dropped from the lock too. The lock file only *tracks* history — `locale-ai check` reads it to fail CI on a translation gone stale, and committing the lock (like a package lock) is what makes that history consistent across machines and CI. It's a flat, one-line-per-key JSON file with short hashes (not a deep, multi-line-per-field tree), so a 5,000-key, 4-locale project stays small and two translators editing different keys touch different lines instead of colliding on every commit.
 - **Structure**: key order, numbers, booleans, arrays, indentation and trailing newline are preserved.
 
 **Format notes**: most formats edit an existing target file in place on a rerun, so comments and hand edits to untouched entries survive; Android, ARB, `.xcstrings` and `.resx` regenerate each entry from the source's own structure instead, and XLIFF does a bit of both (only `<target>` is ever replaced). See [docs/formats.md](docs/formats.md) for the specifics, per format — comment handling, escape conventions, and what does and doesn't survive a rerun.
@@ -65,9 +65,11 @@ Download 577 MB? (Y/n)
 ## Commands
 
 ```bash
-locale-ai translate --to fr,pt-BR [--from en] [--input dir] [--dry-run] [--overwrite] [--fast] [--beams n] [--batch-size n] [--report file] [-y]
-locale-ai check [--from en] [--input dir]   # CI: fails if a translated locale has missing keys or placeholder mismatches
-                                             # (also warns, without failing, about strings left identical to the source)
+locale-ai translate --to fr,pt-BR [--from en] [--input dir] [--dry-run] [--overwrite] [--fast] [--beams n] [--batch-size n] [--report file] [--fuzzy] [--config file] [-y]
+locale-ai check [--from en] [--input dir] [--config file]   # CI: fails if a translated locale has missing keys or placeholder mismatches
+                                                              # (also warns, without failing, about strings left identical to the source)
+locale-ai accept [--to <locales>] [--from en] [--input dir] [--config file] [key...]
+                                             # approve a hand edit as final, so `check`/`translate` stop reporting it (see below)
 locale-ai models list [--from en]     # supported language pairs
 locale-ai models installed
 locale-ai models install en-de        # pre-download (e.g. in CI)
@@ -80,6 +82,22 @@ locale-ai models convert <hf-marian-model> --out <dir>   # bring your own model 
 Models are cached once per machine in `~/.cache/locale-ai` (`LOCALE_AI_CACHE` to change). In CI, pass `--yes`.
 
 Installing trims the `onnxruntime-node` dependency down to the one CPU binary locale-ai actually loads (it ships binaries for every platform/arch plus GPU providers locale-ai never uses) — but only when nothing else in your `node_modules` also depends on it, so a shared copy another package needs for GPU inference is left alone. Set `LOCALE_AI_SKIP_TRIM=1` to disable this entirely.
+
+## Library API
+
+Everything the CLI does is also a plain async function, for a build script or test that wants to call it in-process instead of shelling out:
+
+```ts
+import { translate, check } from "locale-ai";
+
+const result = await translate({ to: ["fr", "es"], yes: true });
+console.log(result.locales); // per-locale counts: strings translated, files written, plural forms added
+
+const report = await check(); // same validation as `locale-ai check`, returned as data instead of printed
+if (!report.ok) process.exitCode = 1;
+```
+
+`translate`/`check` take the same options as their CLI flags (`from`, `to`, `input`, `overwrite`, `config`, ...; `to` accepts a single tag or an array). Unlike the CLI, `translate` never prompts: a download either proceeds (`yes: true`, or a `confirmDownload` hook that resolves to `true`) or the call rejects — pass an `onEvent` hook to observe progress (model downloads, per-locale translation progress, issues) as it happens. See the `TranslateOptions`/`TranslateResult`/`CheckOptions`/`CheckResult` types exported from `locale-ai` for the full shape.
 
 ## Project config (optional)
 
