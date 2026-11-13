@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { Document, isMap, isScalar, parseDocument } from "yaml";
 import { parseLocale } from "./lang.ts";
 
 /**
@@ -165,27 +165,70 @@ function readJsonDoc(file: string, text: string): LocaleDoc {
   return { data, serialize: (d) => withNewline(JSON.stringify(d, null, indent), keepNewline) };
 }
 
+/** Renames a single-key document's top-level key, keeping that key's own comments. */
+function rewrapKey(doc: Document, tag: string): void {
+  const map = doc.contents;
+  if (isMap(map) && map.items.length === 1 && isScalar(map.items[0].key)) {
+    map.items[0].key.value = tag;
+  } else {
+    doc.contents = doc.createNode({ [tag]: doc.toJS() ?? {} }) as typeof doc.contents;
+  }
+}
+
+/**
+ * Writes every string/number/boolean leaf of `v` into `doc` at `base` (plus the
+ * leaf's own key path). `Document#setIn` mutates an existing scalar node's value in
+ * place rather than replacing it, so any comment already attached to that node (a
+ * trailing `# ...`, or one on its own line above) survives untouched; a leaf with no
+ * existing node there yet is simply inserted, with no comment of its own.
+ */
+function setLeaves(doc: Document, base: Array<string | number>, v: unknown): void {
+  if (Array.isArray(v)) v.forEach((item, i) => setLeaves(doc, [...base, i], item));
+  else if (isObj(v)) for (const [k, val] of Object.entries(v)) setLeaves(doc, [...base, k], val);
+  else doc.setIn(base, v);
+}
+
 /**
  * Rails and some other frameworks nest an entire YAML locale file under a single
  * top-level key matching the locale tag itself (`en:\n  hello: Hi`), so the file is
  * valid wherever it's loaded from. Detect that wrapper and unwrap it before handing
  * `data` to the rest of the pipeline (which otherwise treats "en" as just another
  * translatable key), then re-wrap under the target's own tag on serialize.
+ *
+ * Re-serializing edits an existing YAML document (the target file's own, when it
+ * already exists, otherwise a clone of the source's) in place via `setIn` instead of
+ * building a plain object and stringifying it from scratch — the latter would throw
+ * away every `#` comment in the file on every run.
  */
 function readYamlDoc(file: string, text: string, tag: string): LocaleDoc {
-  let raw: unknown;
+  let srcDoc: Document;
   try {
-    raw = parseYaml(text) ?? {};
+    srcDoc = parseDocument(text);
   } catch (e) {
     throw new Error(`Invalid YAML in ${file}: ${(e as Error).message}`);
   }
+  if (srcDoc.errors.length) throw new Error(`Invalid YAML in ${file}: ${srcDoc.errors[0].message}`);
+  const raw = srcDoc.toJS() ?? {};
   const indent = Number(/\n( +)\S/.exec(text)?.[1].length) || 2;
   const keepNewline = finalNewline(text);
   const keys = isObj(raw) ? Object.keys(raw) : [];
   const wrapped = keys.length === 1 && keys[0] === tag;
   const data = wrapped ? (raw as Obj)[tag] : raw;
-  const serialize = (d: unknown, targetTag: string): string =>
-    withNewline(stringifyYaml(wrapped ? { [targetTag]: d } : d, { indent }), keepNewline);
+  const serialize = (d: unknown, targetTag: string, existingText?: string): string => {
+    let base: Document | undefined;
+    if (existingText !== undefined) {
+      try {
+        const parsed = parseDocument(existingText);
+        if (parsed.errors.length === 0) base = parsed;
+      } catch {
+        // Fall through to the source clone below.
+      }
+    }
+    base ??= srcDoc.clone();
+    if (wrapped) rewrapKey(base, targetTag);
+    setLeaves(base, wrapped ? [targetTag] : [], d);
+    return withNewline(base.toString({ indent }), keepNewline);
+  };
   return { data, serialize };
 }
 
@@ -724,6 +767,48 @@ export function addPluralForms(doc: unknown, targetLang: string): { doc: unknown
           out[`${id}_${cat}`] = other;
           added++;
         }
+      }
+    }
+    return out;
+  };
+  return { doc: visit(doc), added };
+}
+
+/**
+ * Rails and some other frameworks nest plural forms under the key itself
+ * (`item:\n  one: "%{count} item"\n  other: "%{count} items"`) instead of i18next's
+ * `item_one`/`item_other` suffix convention. A value is treated as a plural group
+ * when every one of its keys is a CLDR plural category and "other" (the mandatory
+ * fallback) is among them and there's at least one more alongside it — a single
+ * `{ other: "..." }` object is too common as an ordinary translation value (e.g. a
+ * key literally named "other") to treat as a plural group on its own.
+ */
+export function addNestedPluralForms(doc: unknown, targetLang: string): { doc: unknown; added: number } {
+  let added = 0;
+  const visit = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(visit);
+    if (!isObj(v)) return v;
+    const keys = Object.keys(v);
+    const isGroup =
+      keys.length >= 2 && keys.includes("other") && keys.every((k) => CATEGORIES.includes(k) && typeof v[k] === "string");
+    if (!isGroup) {
+      const out = newObj();
+      for (const k of keys) out[k] = visit(v[k]);
+      return out;
+    }
+    let needed: string[];
+    try {
+      needed = new Intl.PluralRules(targetLang).resolvedOptions().pluralCategories as string[];
+    } catch {
+      needed = keys;
+    }
+    const other = v.other as string;
+    const out = newObj();
+    for (const cat of CATEGORIES) {
+      if (keys.includes(cat)) out[cat] = v[cat];
+      else if (needed.includes(cat)) {
+        out[cat] = other;
+        added++;
       }
     }
     return out;

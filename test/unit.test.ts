@@ -10,6 +10,7 @@ import { extractPipePlural } from "../src/vue-plural.ts";
 import { parseLocale } from "../src/lang.ts";
 import { editedPaths, hashOf, isSourceStale, loadLock, recordEntries, saveLock } from "../src/lock.ts";
 import {
+  addNestedPluralForms,
   addPluralForms,
   buildTarget,
   detectLayout,
@@ -350,6 +351,94 @@ test("Rails-style YAML: single top-level key matching the locale tag is unwrappe
   const plainDoc = readLocaleDoc(plain, "en");
   assert.deepEqual(plainDoc.data, { login: { submit: "Sign in" } });
   assert.equal(plainDoc.serialize(plainDoc.data, "fr"), "login:\n  submit: Sign in\n");
+});
+
+test("YAML: comments survive a translation rewrite, on a fresh target and on a rerun over an edited one", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-yaml-comments-"));
+  const file = path.join(root, "en.yml");
+  fs.writeFileSync(
+    file,
+    "# top-level note\nlogin:\n  # shown on the sign-in button\n  submit: Sign in # inline note\n  cancel: Cancel\n",
+  );
+  const doc = readLocaleDoc(file, "en");
+
+  // First write for a target that doesn't exist yet: the source's own comments carry over.
+  const first = doc.serialize({ login: { submit: "Se connecter", cancel: "Annuler" } }, "fr");
+  assert.equal(
+    first,
+    "# top-level note\nlogin:\n  # shown on the sign-in button\n  submit: Se connecter # inline note\n  cancel: Annuler\n",
+  );
+
+  // A translator hand-edits the target and adds their own comment; a rerun (passing the
+  // target's current text as `existingText`) keeps it, including on the unchanged value.
+  const edited =
+    "# top-level note\nlogin:\n  # shown on the sign-in button\n  submit: Se connecter ! # inline note\n  # double-checked\n  cancel: Annuler\n";
+  const rerun = doc.serialize({ login: { submit: "Se connecter !", cancel: "Annuler" } }, "fr", edited);
+  assert.equal(rerun, edited);
+
+  // A key added to the source since the last run is appended with no comment of its own.
+  fs.writeFileSync(
+    file,
+    "# top-level note\nlogin:\n  # shown on the sign-in button\n  submit: Sign in # inline note\n  cancel: Cancel\n  reset: Reset password\n",
+  );
+  const doc2 = readLocaleDoc(file, "en");
+  const withNewKey = doc2.serialize(
+    { login: { submit: "Se connecter !", cancel: "Annuler", reset: "Réinitialiser le mot de passe" } },
+    "fr",
+    edited,
+  );
+  assert.equal(
+    withNewKey,
+    "# top-level note\nlogin:\n  # shown on the sign-in button\n  submit: Se connecter ! # inline note\n  # double-checked\n  cancel: Annuler\n  reset: Réinitialiser le mot de passe\n",
+  );
+});
+
+test("Rails-style YAML: the wrapper key's own comments carry over when rewrapped under the target's tag", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-yaml-rails-comments-"));
+  const file = path.join(root, "en.yml");
+  fs.writeFileSync(file, "# locale file\nen:\n  hello: Hello # greeting\n");
+  const doc = readLocaleDoc(file, "en");
+  assert.equal(doc.serialize({ hello: "Bonjour" }, "fr"), "# locale file\nfr:\n  hello: Bonjour # greeting\n");
+});
+
+test("addNestedPluralForms: Rails-style nested one/other groups get the target language's missing categories", () => {
+  const data = {
+    item: { one: "%{count} item", other: "%{count} items" },
+    // Not a plural group: a lone "other" key is too common as an ordinary value to assume.
+    single: { other: "Misc" },
+    nested: { deep: { one: "one deep thing", other: "%{count} deep things" } },
+  };
+  const { doc, added } = addNestedPluralForms(data, "ar");
+  assert.equal(added, 8); // ar needs zero/one/two/few/many/other; 4 missing per group, 2 groups
+  assert.equal(
+    JSON.stringify(doc),
+    JSON.stringify({
+      item: {
+        zero: "%{count} items",
+        one: "%{count} item",
+        two: "%{count} items",
+        few: "%{count} items",
+        many: "%{count} items",
+        other: "%{count} items",
+      },
+      single: { other: "Misc" },
+      nested: {
+        deep: {
+          zero: "%{count} deep things",
+          one: "one deep thing",
+          two: "%{count} deep things",
+          few: "%{count} deep things",
+          many: "%{count} deep things",
+          other: "%{count} deep things",
+        },
+      },
+    }),
+  );
+
+  // English only needs one/other: nothing is added.
+  const { doc: en, added: addedEn } = addNestedPluralForms(data, "en");
+  assert.equal(addedEn, 0);
+  assert.equal(JSON.stringify((en as { item: unknown }).item), JSON.stringify({ one: "%{count} item", other: "%{count} items" }));
 });
 
 test("Apple .strings: comments kept per key, round-trip style, new keys appended", () => {

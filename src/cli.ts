@@ -19,6 +19,7 @@ import { CONFIG_FILE, glossaryLookup, loadConfig, protectRegex, type ProjectConf
 import { intlCode, parseLocale, type Locale } from "./lang.ts";
 import { editedPaths, isSourceStale, LOCK_FILENAME, loadLock, recordEntries, saveLock } from "./lock.ts";
 import {
+  addNestedPluralForms,
   addPluralForms,
   buildTarget,
   detectLayout,
@@ -320,7 +321,9 @@ async function cmdTranslate(argv: string[]): Promise<number> {
         }
       }
       const built = buildTarget(f.doc.data, f.existing, (s) => translations.get(s) ?? s, values.overwrite!, isProtectedKey, isStale);
-      const plural = usesI18nextPlurals(f.source) ? addPluralForms(built, intlCode(job.locale)) : { doc: built, added: 0 };
+      let plural = usesI18nextPlurals(f.source) ? addPluralForms(built, intlCode(job.locale)) : { doc: built, added: 0 };
+      const nested = addNestedPluralForms(plural.doc, intlCode(job.locale));
+      plural = { doc: nested.doc, added: plural.added + nested.added };
       pluralsAdded += plural.added;
       const before = fs.existsSync(f.target) ? fs.readFileSync(f.target, "utf8") : undefined;
       const text = f.doc.serialize(plural.doc, job.locale.tag, before);
