@@ -38,6 +38,7 @@ const SOURCES = [
   /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/.source, // e-mail addresses
   /(?<=^|[\s(])(?::[a-zA-Z_]\w*)/.source, // :attribute  laravel
   /\$(?![A-Z]{2,}(?![a-zA-Z0-9_]))[A-Za-z_]\w*/.source, // $name (not "$USD", "$CAD" — currency codes)
+  /[©®™]/.source, // copyright/registered/trademark symbols — models drop these on a second (pivoted) hop
 ];
 
 const PLACEHOLDER_SRC = SOURCES.map((s) => `(?:${s})`).join("|");

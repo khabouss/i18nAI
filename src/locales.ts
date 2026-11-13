@@ -193,9 +193,39 @@ export function detectLayout(cwd: string, from: string, input?: string): Layout 
     const l = layoutAt(path.resolve(cwd, c), from);
     if (l) return l;
   }
+  const found = detectAlternateLocale(cwd, from);
+  const hint = found ? ` Found "${found}" instead — did you mean --from ${found}?` : "";
   throw new Error(
-    `Could not find "${from}" locale files. Use --input <dir> to point at the folder containing ${from}/ or ${from}${EXTENSIONS.join("/")}.`,
+    `Could not find "${from}" locale files. Use --input <dir> to point at the folder containing ${from}/ or ${from}${EXTENSIONS.join("/")}.${hint}`,
   );
+}
+
+/**
+ * Scans the same candidate roots `detectLayout` just searched for `from`, for any OTHER
+ * tag that looks like a locale and actually has content — so a non-English-source project
+ * (the single most common reason this error fires) gets pointed at the right `--from`
+ * instead of just being told what wasn't found.
+ */
+function detectAlternateLocale(cwd: string, from: string): string | undefined {
+  for (const c of CANDIDATES) {
+    const root = path.resolve(cwd, c);
+    if (!isDir(root)) continue;
+    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+      if (entry.isDirectory()) {
+        if (entry.name !== from && looksLikeLocale(entry.name) && listLocaleFiles(path.join(root, entry.name)).length > 0) {
+          return entry.name;
+        }
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const ext = EXTENSIONS.find((e) => entry.name.endsWith(e));
+      if (!ext) continue;
+      const tag = tagFromPropertiesQualifier(ext, entry.name.slice(0, -ext.length));
+      if (tag !== from && looksLikeLocale(tag)) return tag;
+    }
+  }
+  return undefined;
 }
 
 function listLocaleFiles(dir: string): string[] {
