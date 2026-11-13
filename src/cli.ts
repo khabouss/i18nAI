@@ -64,6 +64,11 @@ Usage:
                         placeholders as the source, and (via locale-ai.lock.json, if present)
                         that none has gone stale since it was last translated, without
                         translating anything. Exits non-zero on a mismatch (CI-friendly).
+  locale-ai accept [--to <locales>] [--from <locale>] [--input <dir>] [--config <file>] [key...]
+                        Approve a translator's hand edit at <key> (or, with no key given,
+                        every key for the chosen locale(s)) as final: the lock stops
+                        flagging it as "edited" on future runs. Never changes the file
+                        itself — only what the lock remembers it last wrote there.
   locale-ai models list [--from <locale>]
   locale-ai models installed
   locale-ai models install <from-to | model-id> [--yes]
@@ -590,6 +595,62 @@ async function cmdCheck(argv: string[]): Promise<number> {
 }
 
 /**
+ * Approves the current on-disk target text at one or more keys (or, with no
+ * keys given, every key the target file and source share) as this tool's own
+ * — so a future `translate`/`check` run stops reporting it under the
+ * "edited" issue kind. The file on disk is never touched; only the lock's
+ * record of what this tool last wrote there is advanced to match, the same
+ * as if it had just (re)written that exact text itself.
+ */
+async function cmdAccept(argv: string[]): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      from: { type: "string", default: "en" },
+      to: { type: "string" },
+      input: { type: "string" },
+      config: { type: "string" },
+    },
+  });
+  const from = parseLocale(values.from!);
+  const config = loadConfig(process.cwd(), values.config);
+  const layout = detectLayout(process.cwd(), from.tag, values.input);
+  const lockDir = config.configFile ? path.dirname(config.configFile) : layout.root;
+  const lockPath = path.resolve(lockDir, LOCK_FILENAME);
+  const lock = loadLock(lockPath);
+  const tags = values.to ? values.to.split(",").map((t) => parseLocale(t.trim()).tag) : existingTargets(layout, from.tag);
+  if (!tags.length) {
+    log(`No translated locales found next to ${from.tag}.`);
+    return 0;
+  }
+  const wanted = positionals.length ? new Set(positionals) : undefined;
+  const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag, true) }));
+
+  let accepted = 0;
+  for (const to of tags) {
+    for (const { file, doc } of sources) {
+      const target = targetFile(layout, from.tag, to, file);
+      if (!fs.existsSync(target)) continue;
+      const srcByPath = new Map(flattenStrings(doc.data).map((e) => [e.path, e.value]));
+      const entries = flattenStrings(readLocaleDoc(target, to).data)
+        .filter((e) => (!wanted || wanted.has(e.path)) && srcByPath.has(e.path))
+        .map((e) => ({ path: e.path, source: srcByPath.get(e.path)!, written: e.value }));
+      if (!entries.length) continue;
+      recordEntries(lock, fileKey(file, lockDir), to, entries);
+      accepted += entries.length;
+    }
+  }
+  saveLock(lockPath, lock);
+  log(
+    accepted
+      ? `✓ Accepted ${accepted} key${accepted === 1 ? "" : "s"} across ${tags.length} locale${tags.length === 1 ? "" : "s"} — \`check\`/\`translate\` won't flag ${accepted === 1 ? "it" : "them"} as edited again.`
+      : `No matching key${wanted && wanted.size === 1 ? "" : "s"} found to accept.`,
+  );
+  return 0;
+}
+
+/**
  * Re-runs scripts/trim-onnxruntime.cjs's cleanup on every invocation, not just
  * at install time: npm doesn't guarantee that script (locale-ai's own
  * postinstall) runs after onnxruntime-node's own postinstall has finished
@@ -615,6 +676,8 @@ async function main(): Promise<number> {
       return cmdTranslate(rest);
     case "check":
       return cmdCheck(rest);
+    case "accept":
+      return cmdAccept(rest);
     case "models":
       return cmdModels(rest);
     case "-v":

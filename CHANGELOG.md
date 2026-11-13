@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.5
+
+A follow-up round from the same external review:
+
+- **There was no way to approve a hand edit.** Once the lock flagged a target string as "edited", it stayed flagged forever — the only way out was `--overwrite`, which re-translates everything and wipes every *other* hand edit too. `locale-ai accept [--to <locales>] [key...]` now records the current on-disk text as approved (for one key, several, or every key with none given) without touching the file or retranslating anything.
+- **The lock file didn't scale.** Its old (version 2) shape nested `files[fileKey][path].mt[locale]` objects several levels deep with 16-character hashes — a 5,000-key, 4-locale project produced a multi-megabyte file where every run touched lines scattered throughout it, a dedicated source of merge conflicts for teams committing it. It's now flat (one `"<fileKey>#<path>"` entry per key, one line each) with 8-character hashes, roughly 10x smaller for a project that size; a pre-0.7.5 lock is migrated automatically, with no spurious re-translation.
+- **XLIFF dropped a translator's `state="final"`/`state="needs-review"` attribute** even on a run that retranslated nothing — any `<target>` got replaced with a fresh, attribute-less one regardless. An unchanged `<target>` is now left completely untouched.
+- **A JS/TS locale module's same-line trailing comment (`home: 'Home', // note`) moved onto the next key** on a rewrite, so it looked like it described the wrong entry. It now stays attached to the key it was actually commenting on.
+- A small changelog correction: the 0.7.0 entry below previously said that review "ran the CLI end-to-end against real cached models" — it actually used a stub translator, since the reviewer's sandbox couldn't reach Hugging Face. Speed/quality benchmarks and the quantization-batching tradeoff the same review asked about were already measured and documented (see the README's "Speed" and "Known limitations" sections); re-verified against real cached models as part of this round, numbers unchanged. ja/ko are likewise already a documented gap (no usable OPUS-MT model), not a new one.
+
 ## 0.7.4
 
 The last three items from the same external review:
@@ -30,7 +40,7 @@ Three Android `strings.xml` bugs found by the same external review, all from its
 
 ## 0.7.0
 
-Fixes to `locale-ai.lock.json`, the incremental-translation lock file, found by an external review that ran the CLI end-to-end against real cached models:
+Fixes to `locale-ai.lock.json`, the incremental-translation lock file, found by an external review that ran the CLI end-to-end against a stub translator (not real models — the reviewer's sandbox couldn't reach Hugging Face):
 
 - **Per-locale source tracking.** The lock used to store one source-string hash shared by every target locale. Translating `--to es` after editing a source string would mark that string "up to date" for `es` *and* for a `--to fr` run that hadn't happened yet — so `fr` silently kept the outdated translation. The hash is now tracked per locale.
 - **Hand edits are never silently adopted.** A translator's edit to a target file is detected and reported for review, same as before — but it used to be recorded as if the tool itself had written it, so a later run would stop reporting it, and a subsequent source change would overwrite the edit with no warning at all. The lock no longer updates its "last written" record for a path unless this run actually (re)translated it, so an unresolved edit keeps being reported every run. If the source changes *while* an edit is still pending, that's now reported as a **conflict** instead of either side winning silently. `--overwrite` still forces past all of this when that's what you want.

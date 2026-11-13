@@ -826,10 +826,11 @@ function parseXliffUnits(text: string): { segments: XliffSegment[]; units: Xliff
  * every run), only the `<target>` element itself is ever replaced — every other child
  * a `<trans-unit>` can have (`<note>`, `<context-group>` recording where the string is
  * used in the app's own source, `<alt-trans>`, ...) rides through completely untouched,
- * in its original position, since the rest of the unit's text is never regenerated. A
- * translator's own `<target state="...">` attribute is the one exception: a fresh
- * `<target>` (no attributes) replaces it wholesale on a rerun, the same documented
- * tradeoff Android already makes for comments on an already-translated string.
+ * in its original position, since the rest of the unit's text is never regenerated. If
+ * the target text itself hasn't changed, the `<target>` element isn't touched either —
+ * a CAT tool's own `state="final"`/`state="needs-review"` attribute survives a run that
+ * didn't retranslate that string. Only an actual retranslation replaces it with a fresh,
+ * attribute-less `<target>`.
  *
  * Only reached via `--input <file>.xlf`/`.xliff`: the source file's name carries no
  * locale tag at all (XLIFF puts it in `source-language` instead), so there's no
@@ -860,6 +861,11 @@ function readXliffDoc(file: string, text: string, isSource: boolean): LocaleDoc 
       const u = units[seg.unit];
       if (!u.translatable) return u.whole;
       const v = typeof obj[u.id] === "string" ? (obj[u.id] as string) : "";
+      if (u.targetWhole !== undefined && u.targetInner !== undefined && unescapeXml(u.targetInner) === v) {
+        // Text unchanged: leave the <target> element exactly as it is, attributes included
+        // (a CAT tool's own state="final"/"needs-review" survives a run that translated nothing).
+        return u.whole;
+      }
       const newTarget = `<target>${escapeXmlKeepTags(v)}</target>`;
       if (u.targetWhole) return u.whole.replace(u.targetWhole, newTarget);
       // No <target> yet (first translation): insert one right after </source>, at <source>'s own indent.
@@ -970,7 +976,7 @@ function readResxDoc(file: string, text: string): LocaleDoc {
 const JS_EXPORT_RE = /\b(?:export\s+default|module\.exports\s*=|exports\.default\s*=)\s*/;
 
 interface JsMetaNode {
-  [key: string]: { comment?: string; nested?: JsMetaNode };
+  [key: string]: { comment?: string; trailing?: string; nested?: JsMetaNode };
 }
 
 /** Skips whitespace and `//`/`/* *\/` comments, returning the last comment seen (if any) immediately before the next token. */
@@ -1067,6 +1073,40 @@ function parseJsArray(text: string, pos: { i: number }): unknown[] {
   return out;
 }
 
+/**
+ * A same-line trailing comment right after a value's comma (`home: 'Home', // note`) —
+ * never a comment on its own line, which belongs to the *next* key instead (that one's
+ * picked up by `skipJsTrivia` at the top of the next loop iteration). Only recognized
+ * when an actual comma precedes it: that keeps a missing-comma typo a clear parse error
+ * (the normal comma/`}` check below still runs) rather than a silently forgiven one.
+ * Consumes the comma together with the comment when both are found, so the caller never
+ * has to tell them apart; otherwise consumes nothing; leaving the comma, if any, for the
+ * caller's own check.
+ */
+function skipJsTrailingComment(text: string, pos: { i: number }): string | undefined {
+  let i = pos.i;
+  while (i < text.length && (text[i] === " " || text[i] === "\t")) i++;
+  if (text[i] !== ",") return undefined;
+  i++;
+  while (i < text.length && (text[i] === " " || text[i] === "\t")) i++;
+  let comment: string | undefined;
+  let end = i;
+  if (text.startsWith("//", i)) {
+    end = text.indexOf("\n", i);
+    if (end === -1) end = text.length;
+    comment = text.slice(i, end);
+  } else if (text.startsWith("/*", i)) {
+    const close = text.indexOf("*/", i + 2);
+    if (close !== -1) {
+      end = close + 2;
+      comment = text.slice(i, end);
+    }
+  }
+  if (comment === undefined) return undefined; // comma present but nothing to attach on this line; leave it for the normal check
+  pos.i = end;
+  return comment;
+}
+
 function parseJsObject(text: string, pos: { i: number }): { value: Obj; meta: JsMetaNode } {
   pos.i++; // '{'
   const value = newObj();
@@ -1085,7 +1125,17 @@ function parseJsObject(text: string, pos: { i: number }): { value: Obj; meta: Js
     skipJsTrivia(text, pos);
     const { value: v, meta: childMeta } = parseJsValue(text, pos);
     value[key] = v;
-    if (comment !== undefined || childMeta) meta[key] = { comment, nested: childMeta };
+    const trailing = skipJsTrailingComment(text, pos);
+    if (comment !== undefined || trailing !== undefined || childMeta) meta[key] = { comment, trailing, nested: childMeta };
+    if (trailing !== undefined) {
+      // The comma (this key's own separator) and its trailing comment are both already consumed.
+      skipJsTrivia(text, pos);
+      if (text[pos.i] === "}") {
+        pos.i++;
+        break;
+      }
+      continue;
+    }
     skipJsTrivia(text, pos);
     if (text[pos.i] === ",") {
       pos.i++;
@@ -1151,9 +1201,10 @@ function serializeJsObject(obj: Obj, meta: JsMetaNode | undefined, level: number
   const lines = keys.map((k) => {
     const m = meta?.[k];
     const commentLine = m?.comment ? `${pad}${m.comment}\n` : "";
-    return `${commentLine}${pad}${jsKeyLiteral(k, quote)}: ${serializeJsValue(obj[k], m?.nested, level + 1, step, quote)}`;
+    const trailing = m?.trailing ? ` ${m.trailing}` : "";
+    return `${commentLine}${pad}${jsKeyLiteral(k, quote)}: ${serializeJsValue(obj[k], m?.nested, level + 1, step, quote)},${trailing}`;
   });
-  return `{\n${lines.join(",\n")},\n${step.repeat(level)}}`;
+  return `{\n${lines.join("\n")}\n${step.repeat(level)}}`;
 }
 
 function readJsModuleDoc(file: string, text: string): LocaleDoc {

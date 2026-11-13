@@ -10,71 +10,104 @@ import fs from "node:fs";
  * written hashes are kept per locale (not shared across locales translated at
  * different times) so that translating "es" today doesn't make a stale "fr"
  * look up to date tomorrow.
+ *
+ * Flat by design (one `"<fileKey>#<path>"` entry per key, rather than nested
+ * `files[fileKey][path].mt[locale]` objects spread across many lines): a
+ * project with thousands of keys and a dozen locales produced a multi-megabyte,
+ * six-levels-deep lock file under the old (version 2) shape, where every run
+ * touched lines scattered all over the file — a dedicated source of merge
+ * conflicts for teams committing it. Flattening the path, and shortening each
+ * hash to 8 hex characters (still 4 billion-to-one odds of a false match,
+ * plenty for change detection rather than cryptographic integrity), keeps the
+ * whole record for one key on one line, so two translators editing different
+ * keys touch different lines.
  */
 export interface LockFile {
-  version: 2;
-  files: Record<string, Record<string, LockEntry>>;
+  version: 3;
+  /** `entries["<fileKey>#<path>"][targetTag]` = `"<sourceHash8>:<writtenHash8>"`. */
+  entries: Record<string, Record<string, string>>;
 }
 
-/** Per target-locale state for one key path. */
-interface LocaleState {
-  /** Hash of the source string as of the last run that translated or confirmed it for this locale. */
-  source: string;
-  /** Hash of the text this tool last wrote at this path for this locale. */
-  written: string;
+/** Shape written by locale-ai 0.7.0–0.7.x (version 2): nested per file/path/locale, 16-char hashes. */
+interface LockFileV2 {
+  files: Record<string, Record<string, { mt: Record<string, { source: string; written: string }> }>>;
 }
 
-interface LockEntry {
-  mt: Record<string, LocaleState>;
-}
-
-/** Shape written by locale-ai < 0.7.0: one source hash shared by every locale. */
-interface LockEntryV1 {
-  source: string;
-  mt: Record<string, string>;
+/** Shape written by locale-ai < 0.7.0 (version 1): one source hash shared by every locale, 16-char hashes. */
+interface LockFileV1 {
+  files: Record<string, Record<string, { source: string; mt: Record<string, string> }>>;
 }
 
 export const LOCK_FILENAME = "locale-ai.lock.json";
 
+const entryKey = (fileKey: string, path: string) => `${fileKey}#${path}`;
+
 export function hashOf(s: string): string {
-  return crypto.createHash("sha256").update(s, "utf8").digest("hex").slice(0, 16);
+  return crypto.createHash("sha256").update(s, "utf8").digest("hex").slice(0, 8);
+}
+
+/** Splits a stored `"<source>:<written>"` pair back into its two hashes. */
+function parsePair(pair: string | undefined): { source: string; written: string } | undefined {
+  if (pair === undefined) return undefined;
+  const i = pair.indexOf(":");
+  return i === -1 ? undefined : { source: pair.slice(0, i), written: pair.slice(i + 1) };
 }
 
 /**
- * Loads the lock, migrating a pre-0.7.0 (version 1) file in memory: its one
- * shared `source` hash becomes that path's `source` for every locale it had
- * already written a hash for. That's an approximation (the real per-locale
- * source hash at the time each locale was last translated is not recoverable),
- * but it only risks one extra re-translation per locale, never a missed one,
- * and never a silent overwrite.
+ * Loads the lock, migrating an older file in memory. Version 1's one shared
+ * `source` hash becomes that path's `source` for every locale it had already
+ * written a hash for — an approximation (the real per-locale source hash at
+ * the time each locale was last translated isn't recoverable), but it only
+ * risks one extra re-translation per locale, never a missed one, and never a
+ * silent overwrite. Both older versions' 16-character hashes are truncated to
+ * the 8 characters `hashOf` now produces — the same prefix of the same SHA-256
+ * digest, so every existing hash still compares equal to a freshly computed
+ * one; nothing needs re-translating just because of the migration itself.
  */
 export function loadLock(file: string): LockFile {
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { version?: unknown; files?: unknown };
-    if (!parsed || typeof parsed !== "object" || !parsed.files || typeof parsed.files !== "object") {
-      return { version: 2, files: {} };
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { version?: unknown };
+    if (!parsed || typeof parsed !== "object") return { version: 3, entries: {} };
+    if ((parsed as { version?: unknown }).version === 3) {
+      const entries = (parsed as { entries?: unknown }).entries;
+      return { version: 3, entries: entries && typeof entries === "object" ? (entries as LockFile["entries"]) : {} };
     }
-    if (parsed.version === 2) return { version: 2, files: parsed.files as LockFile["files"] };
-    const v1 = parsed.files as Record<string, Record<string, LockEntryV1>>;
-    const files: LockFile["files"] = {};
-    for (const [fileKey, entries] of Object.entries(v1)) {
-      const migrated: Record<string, LockEntry> = {};
-      for (const [path, entry] of Object.entries(entries ?? {})) {
-        const mt: Record<string, LocaleState> = {};
-        for (const [tag, written] of Object.entries(entry?.mt ?? {})) mt[tag] = { source: entry.source, written };
-        migrated[path] = { mt };
+    const entries: LockFile["entries"] = {};
+    if ((parsed as { version?: unknown }).version === 2) {
+      const v2 = parsed as LockFileV2;
+      for (const [fk, paths] of Object.entries(v2.files ?? {})) {
+        for (const [p, entry] of Object.entries(paths ?? {})) {
+          const mt: Record<string, string> = {};
+          for (const [tag, state] of Object.entries(entry?.mt ?? {})) {
+            mt[tag] = `${state.source.slice(0, 8)}:${state.written.slice(0, 8)}`;
+          }
+          if (Object.keys(mt).length) entries[entryKey(fk, p)] = mt;
+        }
       }
-      files[fileKey] = migrated;
+      return { version: 3, entries };
     }
-    return { version: 2, files };
+    const v1 = parsed as LockFileV1;
+    for (const [fk, paths] of Object.entries(v1.files ?? {})) {
+      for (const [p, entry] of Object.entries(paths ?? {})) {
+        const mt: Record<string, string> = {};
+        for (const [tag, written] of Object.entries(entry?.mt ?? {})) {
+          mt[tag] = `${entry.source.slice(0, 8)}:${written.slice(0, 8)}`;
+        }
+        if (Object.keys(mt).length) entries[entryKey(fk, p)] = mt;
+      }
+    }
+    return { version: 3, entries };
   } catch {
     // Missing or invalid: start fresh rather than fail the run.
   }
-  return { version: 2, files: {} };
+  return { version: 3, entries: {} };
 }
 
+/** One JSON object, but one entry per line (sorted for a stable diff) rather than `JSON.stringify`'s nested, multi-line-per-field layout — so a change to one key never shifts lines belonging to another. */
 export function saveLock(file: string, lock: LockFile): void {
-  fs.writeFileSync(file, `${JSON.stringify(lock, null, 2)}\n`);
+  const keys = Object.keys(lock.entries).sort();
+  const body = keys.length ? keys.map((k) => `  ${JSON.stringify(k)}: ${JSON.stringify(lock.entries[k])}`).join(",\n") : "";
+  fs.writeFileSync(file, `{\n  "version": 3,\n  "entries": {\n${body}\n  }\n}\n`);
 }
 
 /**
@@ -85,8 +118,8 @@ export function saveLock(file: string, lock: LockFile): void {
  * key, both already handled by the empty-target check).
  */
 export function isSourceStale(lock: LockFile, fileKey: string, path: string, targetTag: string, source: string): boolean {
-  const state = lock.files[fileKey]?.[path]?.mt[targetTag];
-  return state !== undefined && state.source !== hashOf(source);
+  const pair = parsePair(lock.entries[entryKey(fileKey, path)]?.[targetTag]);
+  return pair !== undefined && pair.source !== hashOf(source);
 }
 
 /**
@@ -95,11 +128,12 @@ export function isSourceStale(lock: LockFile, fileKey: string, path: string, tar
  * anyone else) edited it since. Only reported; the edit is never silently
  * overwritten, and a source change alone never clears this (see
  * `editedPaths`'s caller, which treats stale + edited as a conflict rather
- * than re-translating).
+ * than re-translating) — until `locale-ai accept` records the current text
+ * as approved.
  */
 export function isEdited(lock: LockFile, fileKey: string, path: string, targetTag: string, currentValue: string): boolean {
-  const state = lock.files[fileKey]?.[path]?.mt[targetTag];
-  return state !== undefined && state.written !== hashOf(currentValue);
+  const pair = parsePair(lock.entries[entryKey(fileKey, path)]?.[targetTag]);
+  return pair !== undefined && pair.written !== hashOf(currentValue);
 }
 
 /** Key paths whose existing target text for `targetTag` was edited since this tool last wrote it (see `isEdited`). */
@@ -114,24 +148,31 @@ export function editedPaths(
   return out;
 }
 
-/** Records, for every path actually (re)translated this run, the current source hash and the hash of what ended up on disk, for `targetTag`. */
+/**
+ * Records, for every path given, the current source hash and the hash of
+ * `written`, for `targetTag` — called both for every path actually
+ * (re)translated this run, and by `locale-ai accept` to approve a hand edit
+ * (where `written` is simply the text already on disk, left untouched).
+ */
 export function recordEntries(
   lock: LockFile,
   fileKey: string,
   targetTag: string,
   entries: Array<{ path: string; source: string; written: string }>,
 ): void {
-  const file = (lock.files[fileKey] ??= {});
   for (const { path, source, written } of entries) {
-    const entry = (file[path] ??= { mt: {} });
-    entry.mt[targetTag] = { source: hashOf(source), written: hashOf(written) };
+    const key = entryKey(fileKey, path);
+    const entry = (lock.entries[key] ??= {});
+    entry[targetTag] = `${hashOf(source)}:${hashOf(written)}`;
   }
 }
 
 /** Removes lock entries (for every locale) whose key path no longer exists in the current source — so a deleted key doesn't linger forever. */
 export function pruneDeletedKeys(lock: LockFile, fileKey: string, currentPaths: Iterable<string>): void {
-  const file = lock.files[fileKey];
-  if (!file) return;
   const keep = new Set(currentPaths);
-  for (const path of Object.keys(file)) if (!keep.has(path)) delete file[path];
+  const prefix = entryKey(fileKey, "");
+  for (const key of Object.keys(lock.entries)) {
+    if (!key.startsWith(prefix)) continue;
+    if (!keep.has(key.slice(prefix.length))) delete lock.entries[key];
+  }
 }
