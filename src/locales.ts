@@ -19,18 +19,21 @@ import { parseLocale } from "./lang.ts";
  * auto-detected from CANDIDATES: xcstrings because there's no per-locale file to find
  * at all, xliff because its source file carries no locale tag in its name (the source
  * locale lives inside the file, as `source-language`) — only the convention this
- * project writes target files under (`<basename>.<locale>.xlf`) does.
+ * project writes target files under (`<basename>.<locale>.xlf`) does. .NET's `.resx`
+ * (its own kind "resx") is the same shape as xliff — untagged default resource file,
+ * `<basename>.fr.resx` satellite resources — just with no source-language metadata
+ * inside the file at all to cross-check `--from` against.
  */
 export interface Layout {
-  kind: "dir" | "file" | "android" | "xcstrings" | "xliff";
+  kind: "dir" | "file" | "android" | "xcstrings" | "xliff" | "resx";
   root: string;
-  /** For kind "file": the source file's extension (e.g. ".json", ".po"). For kind "xliff": ".xlf" or ".xliff". */
+  /** For kind "file": the source file's extension (e.g. ".json", ".po"). For kind "xliff"/"resx": ".xlf"/".xliff"/".resx". */
   ext?: string;
   /** For kind "file": a filename prefix shared by every locale file (Flutter's "app_en.arb"). */
   prefix?: string;
   /** For kind "dir": a suffix appended to the locale tag to name the directory (Apple's "en.lproj"). */
   dirSuffix?: string;
-  /** For kind "xcstrings": the one catalog file every locale (including the source) lives in. For kind "xliff": the source file. */
+  /** For kind "xcstrings": the one catalog file every locale (including the source) lives in. For kind "xliff"/"resx": the source file. */
   file?: string;
 }
 
@@ -168,6 +171,9 @@ export function detectLayout(cwd: string, from: string, input?: string): Layout 
       }
       return { kind: "xliff", root: path.dirname(abs), file: abs, ext: abs.endsWith(".xliff") ? ".xliff" : ".xlf" };
     }
+    if (abs.endsWith(".resx") && isFile(abs)) {
+      return { kind: "resx", root: path.dirname(abs), file: abs, ext: ".resx" };
+    }
     const base = path.basename(abs);
     const directExt = EXTENSIONS.find((ext) => base === `${propertiesTag(ext, from)}${ext}`);
     if (directExt && isFile(abs)) return { kind: "file", root: path.dirname(abs), ext: directExt };
@@ -205,7 +211,7 @@ function listLocaleFiles(dir: string): string[] {
 
 export function sourceFiles(layout: Layout, from: string): string[] {
   if (layout.kind === "android") return [path.join(layout.root, "values", "strings.xml")];
-  if (layout.kind === "xcstrings" || layout.kind === "xliff") return [layout.file!];
+  if (layout.kind === "xcstrings" || layout.kind === "xliff" || layout.kind === "resx") return [layout.file!];
   return layout.kind === "dir"
     ? listLocaleFiles(path.join(layout.root, dirNameFor(layout, from)))
     : [path.join(layout.root, fileNameFor(layout, from, layout.ext!))];
@@ -217,7 +223,9 @@ const outputExt = (ext: string) => (ext === ".pot" ? ".po" : ext);
 export function targetFile(layout: Layout, from: string, to: string, src: string): string {
   if (layout.kind === "android") return path.join(layout.root, `values-${androidQualifier(to)}`, "strings.xml");
   if (layout.kind === "xcstrings") return layout.file!;
-  if (layout.kind === "xliff") return path.join(layout.root, `${path.basename(layout.file!, layout.ext!)}.${to}${layout.ext!}`);
+  if (layout.kind === "xliff" || layout.kind === "resx") {
+    return path.join(layout.root, `${path.basename(layout.file!, layout.ext!)}.${to}${layout.ext!}`);
+  }
   if (layout.kind === "file") return path.join(layout.root, fileNameFor(layout, to, outputExt(layout.ext!)));
   const rel = path.relative(path.join(layout.root, dirNameFor(layout, from)), src);
   const ext = path.extname(rel);
@@ -252,7 +260,7 @@ export function existingTargets(layout: Layout, from: string): string[] {
     tags.delete(from);
     return [...tags].filter(looksLikeLocale).sort();
   }
-  if (layout.kind === "xliff") {
+  if (layout.kind === "xliff" || layout.kind === "resx") {
     const base = path.basename(layout.file!, layout.ext!);
     const prefix = `${base}.`;
     const ext = layout.ext!;
@@ -796,6 +804,91 @@ function readXliffDoc(file: string, text: string, isSource: boolean): LocaleDoc 
   return { data, serialize };
 }
 
+interface ResxEntry {
+  name: string;
+  translatable: boolean;
+  valueInner?: string;
+  comment?: string;
+  attrsRaw: string;
+  whole: string;
+  indent: string;
+}
+type ResxSegment = { text: string } | { entry: number };
+
+/** Splits .resx text into literal passthrough segments (the `<root>` wrapper, `<resheader>` boilerplate) and parsed `<data>` entries. */
+function parseResxEntries(text: string): { segments: ResxSegment[]; entries: ResxEntry[] } {
+  const dataRe = /<data\b([^>]*)>([\s\S]*?)<\/data>/g;
+  const segments: ResxSegment[] = [];
+  const entries: ResxEntry[] = [];
+  let last = 0;
+  for (const m of text.matchAll(dataRe)) {
+    const before = text.slice(last, m.index);
+    segments.push({ text: before });
+    const [whole, attrsRaw, inner] = m;
+    const nameMatch = /\bname="([^"]*)"/.exec(attrsRaw);
+    if (!nameMatch) {
+      segments.push({ text: whole });
+    } else {
+      const nonString = /\btype\s*=\s*"[^"]*"/.test(attrsRaw) || /\bmimetype\s*=\s*"[^"]*"/.test(attrsRaw);
+      const valueMatch = /<value\b[^>]*>([\s\S]*?)<\/value>/.exec(inner);
+      const commentMatch = /<comment\b[^>]*>([\s\S]*?)<\/comment>/.exec(inner);
+      const lineIndent = /[ \t]*$/.exec(before)![0];
+      entries.push({
+        name: unescapeXml(nameMatch[1]),
+        translatable: !nonString && !!valueMatch,
+        valueInner: valueMatch?.[1],
+        comment: commentMatch ? unescapeXml(commentMatch[1]) : undefined,
+        attrsRaw,
+        whole,
+        indent: before.includes("\n") ? lineIndent : "",
+      });
+      segments.push({ entry: entries.length - 1 });
+    }
+    last = m.index! + whole.length;
+  }
+  segments.push({ text: text.slice(last) });
+  return { segments, entries };
+}
+
+/**
+ * .NET `.resx`: each string resource is `<data name="Key" xml:space="preserve">
+ * <value>...</value></data>` under `<root>`, alongside required `<resheader>`
+ * boilerplate (`resmimetype`, `version`, the reader/writer class names — kept
+ * untouched) and possibly non-string resources: `<data type="...">` or a `mimetype`
+ * attribute marks an image, icon or other base64-encoded binary blob, left
+ * completely alone rather than mistaken for text. An optional `<comment>` sibling is
+ * a developer note, kept from the source. There's no plural convention of its own; a
+ * `{0}`-style .NET format placeholder is already protected by the same generic
+ * `{name}`/`{0}` pattern every other format gets.
+ *
+ * Like Android/ARB/`.xcstrings`/XLIFF, each entry is regenerated from the source's
+ * own structure every run rather than edited in place. Unlike every XML format here
+ * except xliff, .resx carries no locale metadata of its own to cross-check `--from`
+ * against — the file's culture comes entirely from its name.
+ */
+function readResxDoc(file: string, text: string): LocaleDoc {
+  if (!/<root\b[^>]*>/.test(text)) throw new Error(`Invalid .resx in ${file}: no <root> element found.`);
+  const { segments, entries } = parseResxEntries(text);
+  const data = newObj();
+  for (const e of entries) if (e.translatable && e.valueInner !== undefined) data[e.name] = unescapeXml(e.valueInner);
+  const step = /\r?\n([ \t]+)</.exec(text)?.[1] ?? "  ";
+  const keepNewline = finalNewline(text);
+  const serialize = (d: unknown): string => {
+    const obj = isObj(d) ? d : newObj();
+    const parts = segments.map((seg) => {
+      if ("text" in seg) return seg.text;
+      const e = entries[seg.entry];
+      if (!e.translatable) return e.whole;
+      const v = typeof obj[e.name] === "string" ? (obj[e.name] as string) : "";
+      const inner = e.indent + step;
+      const commentLine = e.comment !== undefined ? `\n${inner}<comment>${escapeXmlKeepTags(e.comment)}</comment>` : "";
+      return `<data${e.attrsRaw}>\n${inner}<value>${escapeXmlKeepTags(v)}</value>${commentLine}\n${e.indent}</data>`;
+    });
+    return withNewline(parts.join(""), keepNewline);
+  };
+  return { data, serialize };
+}
+
 /** ARB (Flutter): plain JSON, but "@key" / "@@locale" entries are metadata, not translatable content. */
 function readArbDoc(file: string, text: string): LocaleDoc {
   let raw: Obj;
@@ -1207,6 +1300,7 @@ export function readLocaleDoc(file: string, tag: string, isSource = false, fuzzy
   if (ext === ".xml") return readAndroidXmlDoc(file, text);
   if (ext === ".xcstrings") return readXcstringsDoc(file, text, tag, isSource);
   if (ext === ".xlf" || ext === ".xliff") return readXliffDoc(file, text, isSource);
+  if (ext === ".resx") return readResxDoc(file, text);
   return readJsonDoc(file, text);
 }
 

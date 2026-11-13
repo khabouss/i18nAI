@@ -897,6 +897,62 @@ test("XLIFF 1.2: inline <x>/<g> markup survives translation like any other prote
   assert.match(out, /target-language="fr"/);
 });
 
+test(".NET .resx: detection (untagged default, dot-separated culture target), resheaders/comments kept, binary resources never touched", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-resx-"));
+  const file = path.join(root, "Resources.resx");
+  const text = `<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <data name="Greeting" xml:space="preserve">
+    <value>Hello, {0}!</value>
+    <comment>Shown on the home page</comment>
+  </data>
+  <data name="AppIcon" type="System.Drawing.Bitmap, System.Drawing" mimetype="application/x-microsoft.net.object.bytearray.base64">
+    <value>Qk1AAAAAAAAAADYAAAAoAAAA</value>
+  </data>
+  <data name="Cancel" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+</root>
+`;
+  fs.writeFileSync(file, text);
+
+  const layout = detectLayout(root, "en", file);
+  assert.deepEqual(layout, { kind: "resx", root, file, ext: ".resx" });
+  assert.deepEqual(sourceFiles(layout, "en"), [file]);
+  assert.equal(targetFile(layout, "en", "fr", file), path.join(root, "Resources.fr.resx"));
+
+  const doc = readLocaleDoc(file, "en", true);
+  assert.equal(JSON.stringify(doc.data), JSON.stringify({ Greeting: "Hello, {0}!", Cancel: "Cancel" }));
+
+  const out = doc.serialize({ Greeting: "Bonjour, {0} !", Cancel: "Annuler" }, "fr");
+  assert.equal(
+    out,
+    `<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <data name="Greeting" xml:space="preserve">
+    <value>Bonjour, {0} !</value>
+    <comment>Shown on the home page</comment>
+  </data>
+  <data name="AppIcon" type="System.Drawing.Bitmap, System.Drawing" mimetype="application/x-microsoft.net.object.bytearray.base64">
+    <value>Qk1AAAAAAAAAADYAAAAoAAAA</value>
+  </data>
+  <data name="Cancel" xml:space="preserve">
+    <value>Annuler</value>
+  </data>
+</root>
+`,
+  );
+
+  fs.writeFileSync(path.join(root, "Resources.fr.resx"), out);
+  assert.deepEqual(existingTargets(layout, "en"), ["fr"]);
+});
+
 test("ARB: @key metadata and @@locale are not translatable and are reinserted; @@locale follows the target", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-arb-"));
   const file = path.join(root, "en.arb");

@@ -74,7 +74,7 @@ Translate options:
   --input <dir>         Folder containing <from>/ or <from>.json/.yaml/.yml/.po/.pot/.arb/.strings,
                         an Android res/ folder (values/strings.xml) (auto-detected),
                         a path straight to a .xcstrings catalog (not auto-detected),
-                        or a path straight to a .xlf/.xliff file (not auto-detected)
+                        or a path straight to a .xlf/.xliff/.resx file (not auto-detected)
   --overwrite           Re-translate strings that already have a translation
   --dry-run             Show what would be translated without downloading or writing
   --fast                Greedy decoding: ~2x faster, slightly lower quality
