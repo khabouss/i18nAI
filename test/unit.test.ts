@@ -823,6 +823,80 @@ leading.space=[FR]  padded
   assert.equal(rerun, edited);
 });
 
+test("XLIFF 1.2: detection via --input (untagged source), target filename convention, source-language mismatch is rejected", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xliff-"));
+  const file = path.join(root, "messages.xlf");
+  fs.writeFileSync(
+    file,
+    `<?xml version="1.0" encoding="UTF-8" ?>
+<xliff version="1.2" xmlns="urn:oasis:names:tc:xliff:document:1.2">
+    <file source-language="en" datatype="plaintext" original="ng.template">
+        <body>
+            <trans-unit id="greeting"><source>Hi</source></trans-unit>
+        </body>
+    </file>
+</xliff>
+`,
+  );
+
+  const layout = detectLayout(root, "en", file);
+  assert.deepEqual(layout, { kind: "xliff", root, file, ext: ".xlf" });
+  assert.deepEqual(sourceFiles(layout, "en"), [file]);
+  assert.equal(targetFile(layout, "en", "fr", file), path.join(root, "messages.fr.xlf"));
+  assert.throws(() => detectLayout(root, "de", file), /source-language "en", not "de"/);
+
+  fs.writeFileSync(path.join(root, "messages.fr.xlf"), fs.readFileSync(file, "utf8"));
+  assert.deepEqual(existingTargets(layout, "en"), ["fr"]);
+});
+
+test("XLIFF 1.2: inline <x>/<g> markup survives translation like any other protected tag; translate=\"no\" and bpt/ept are left untouched", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xliff-rw-"));
+  const file = path.join(root, "messages.xlf");
+  const text = `<?xml version="1.0" encoding="UTF-8" ?>
+<xliff version="1.2" xmlns="urn:oasis:names:tc:xliff:document:1.2">
+    <file source-language="en" datatype="plaintext" original="ng.template">
+        <body>
+            <trans-unit id="greeting" datatype="html">
+                <source>Hello <x id="INTERPOLATION" equiv-text="{{name}}"/>!</source>
+                <note priority="1" from="description">A friendly greeting</note>
+            </trans-unit>
+            <trans-unit id="bold.text" datatype="html">
+                <source>This is <g id="1">bold</g> text.</source>
+            </trans-unit>
+            <trans-unit id="app.id" datatype="html" translate="no">
+                <source>com.acme.app</source>
+            </trans-unit>
+            <trans-unit id="legacy.paired">
+                <source><bpt id="1">[</bpt>bracketed<ept id="1">]</ept></source>
+            </trans-unit>
+        </body>
+    </file>
+</xliff>
+`;
+  fs.writeFileSync(file, text);
+  const doc = readLocaleDoc(file, "en", true);
+  assert.equal(
+    JSON.stringify(doc.data),
+    JSON.stringify({
+      greeting: 'Hello <x id="INTERPOLATION" equiv-text="{{name}}"/>!',
+      "bold.text": "This is <g id=\"1\">bold</g> text.",
+    }),
+  );
+
+  const translated = {
+    greeting: 'Bonjour <x id="INTERPOLATION" equiv-text="{{name}}"/> !',
+    "bold.text": 'Ceci est <g id="1">gras</g>.',
+  };
+  const out = doc.serialize(translated, "fr");
+  assert.match(out, /<target>Bonjour <x id="INTERPOLATION" equiv-text="\{\{name\}\}"\/> !<\/target>/);
+  assert.match(out, /<target>Ceci est <g id="1">gras<\/g>\.<\/target>/);
+  assert.match(out, /<note priority="1" from="description">A friendly greeting<\/note>/);
+  // translate="no" and the bpt/ept unit are reproduced byte-for-byte, no <target> added.
+  assert.match(out, /<trans-unit id="app\.id" datatype="html" translate="no">\s*<source>com\.acme\.app<\/source>\s*<\/trans-unit>/);
+  assert.ok(!/<trans-unit id="legacy\.paired">[\s\S]*?<target>/.test(out));
+  assert.match(out, /target-language="fr"/);
+});
+
 test("ARB: @key metadata and @@locale are not translatable and are reinserted; @@locale follows the target", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-arb-"));
   const file = path.join(root, "en.arb");

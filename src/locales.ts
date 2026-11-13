@@ -9,24 +9,28 @@ import { parseLocale } from "./lang.ts";
  *   file:       <root>/en.json                                    ->  <root>/fr.json
  *   android:    <root>/values/strings.xml                         ->  <root>/values-fr/strings.xml
  *   xcstrings:  <file>.xcstrings (every locale, source included, lives inside this one file)
+ *   xliff:      <file>.xlf (untagged source)                       ->  <file>.fr.xlf
  *
  * dir and file both accept ".json", ".yaml", ".yml", ".po", ".arb", ".strings" or
  * ".properties" files, independently per file. android is its own thing: the file is
  * always named "strings.xml", and the locale lives in the untagged "values" (source)
  * vs. "values-<qualifier>" (target) directory name instead of the file name. xcstrings
- * is the odd one out: there's no per-locale file to find, so it's only ever reached via
- * an explicit `--input <file>.xcstrings` rather than auto-detected from CANDIDATES.
+ * and xliff are both only ever reached via an explicit `--input <file>` rather than
+ * auto-detected from CANDIDATES: xcstrings because there's no per-locale file to find
+ * at all, xliff because its source file carries no locale tag in its name (the source
+ * locale lives inside the file, as `source-language`) — only the convention this
+ * project writes target files under (`<basename>.<locale>.xlf`) does.
  */
 export interface Layout {
-  kind: "dir" | "file" | "android" | "xcstrings";
+  kind: "dir" | "file" | "android" | "xcstrings" | "xliff";
   root: string;
-  /** For kind "file": the source file's extension (e.g. ".json", ".po"). */
+  /** For kind "file": the source file's extension (e.g. ".json", ".po"). For kind "xliff": ".xlf" or ".xliff". */
   ext?: string;
   /** For kind "file": a filename prefix shared by every locale file (Flutter's "app_en.arb"). */
   prefix?: string;
   /** For kind "dir": a suffix appended to the locale tag to name the directory (Apple's "en.lproj"). */
   dirSuffix?: string;
-  /** For kind "xcstrings": the one catalog file every locale (including the source) lives in. */
+  /** For kind "xcstrings": the one catalog file every locale (including the source) lives in. For kind "xliff": the source file. */
   file?: string;
 }
 
@@ -154,6 +158,16 @@ export function detectLayout(cwd: string, from: string, input?: string): Layout 
       }
       return { kind: "xcstrings", root: path.dirname(abs), file: abs };
     }
+    if ((abs.endsWith(".xlf") || abs.endsWith(".xliff")) && isFile(abs)) {
+      const t = readText(abs);
+      const fileTag = /<file\b[^>]*>/.exec(t);
+      if (!fileTag) throw new Error(`Invalid XLIFF in ${input}: no <file> element found.`);
+      const sourceLanguage = /\bsource-language="([^"]*)"/.exec(fileTag[0])?.[1];
+      if (sourceLanguage !== undefined && sourceLanguage !== from) {
+        throw new Error(`${input} has source-language "${sourceLanguage}", not "${from}" — pass --from ${sourceLanguage}.`);
+      }
+      return { kind: "xliff", root: path.dirname(abs), file: abs, ext: abs.endsWith(".xliff") ? ".xliff" : ".xlf" };
+    }
     const base = path.basename(abs);
     const directExt = EXTENSIONS.find((ext) => base === `${propertiesTag(ext, from)}${ext}`);
     if (directExt && isFile(abs)) return { kind: "file", root: path.dirname(abs), ext: directExt };
@@ -191,7 +205,7 @@ function listLocaleFiles(dir: string): string[] {
 
 export function sourceFiles(layout: Layout, from: string): string[] {
   if (layout.kind === "android") return [path.join(layout.root, "values", "strings.xml")];
-  if (layout.kind === "xcstrings") return [layout.file!];
+  if (layout.kind === "xcstrings" || layout.kind === "xliff") return [layout.file!];
   return layout.kind === "dir"
     ? listLocaleFiles(path.join(layout.root, dirNameFor(layout, from)))
     : [path.join(layout.root, fileNameFor(layout, from, layout.ext!))];
@@ -203,6 +217,7 @@ const outputExt = (ext: string) => (ext === ".pot" ? ".po" : ext);
 export function targetFile(layout: Layout, from: string, to: string, src: string): string {
   if (layout.kind === "android") return path.join(layout.root, `values-${androidQualifier(to)}`, "strings.xml");
   if (layout.kind === "xcstrings") return layout.file!;
+  if (layout.kind === "xliff") return path.join(layout.root, `${path.basename(layout.file!, layout.ext!)}.${to}${layout.ext!}`);
   if (layout.kind === "file") return path.join(layout.root, fileNameFor(layout, to, outputExt(layout.ext!)));
   const rel = path.relative(path.join(layout.root, dirNameFor(layout, from)), src);
   const ext = path.extname(rel);
@@ -236,6 +251,17 @@ export function existingTargets(layout: Layout, from: string): string[] {
     }
     tags.delete(from);
     return [...tags].filter(looksLikeLocale).sort();
+  }
+  if (layout.kind === "xliff") {
+    const base = path.basename(layout.file!, layout.ext!);
+    const prefix = `${base}.`;
+    const ext = layout.ext!;
+    return fs
+      .readdirSync(layout.root)
+      .filter((f) => f.startsWith(prefix) && f.endsWith(ext) && f.length > prefix.length + ext.length)
+      .map((f) => f.slice(prefix.length, -ext.length))
+      .filter((tag) => tag !== from && looksLikeLocale(tag))
+      .sort();
   }
   if (layout.kind === "android") {
     return fs
@@ -629,6 +655,143 @@ function readAndroidXmlDoc(file: string, text: string): LocaleDoc {
       blocks.push(e.comment ? `${indent}${e.comment}\n${indent}${tag}` : `${indent}${tag}`);
     }
     return withNewline(`${before}\n${blocks.join("\n")}\n${after}`, keepNewline);
+  };
+  return { data, serialize };
+}
+
+/** XLIFF's `&entity;` references and `<![CDATA[...]]>` — there's no backslash-escape convention to also handle, unlike Android's XML. */
+function unescapeXml(s: string): string {
+  return s
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, (_m, inner: string) => inner)
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+/** Any opening/closing/self-closing tag — the same generic shape placeholders.ts already protects (`<b>`, `<x id="..."/>`, `<g id="1">...</g>`). */
+const XML_TAG_RE = /<\/?[A-Za-z][\w.:-]*(?:\s[^<>]*)?\/?>/g;
+
+/** Escapes `&`/`<`/`>` in plain text while leaving any inline tag (see XML_TAG_RE) completely untouched, so a translated value's own `<x .../>`/`<g>...</g>` markup — carried through verbatim by the placeholder masking — stays valid, literal XML instead of getting entity-escaped into text. */
+function escapeXmlKeepTags(s: string): string {
+  const escapeText = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  let out = "";
+  let last = 0;
+  for (const m of s.matchAll(XML_TAG_RE)) {
+    out += escapeText(s.slice(last, m.index)) + m[0];
+    last = m.index! + m[0].length;
+  }
+  return out + escapeText(s.slice(last));
+}
+
+/** Sets (inserting if absent) one attribute on a single opening XML tag's raw text. */
+function setXmlAttr(tag: string, name: string, value: string): string {
+  const re = new RegExp(`\\b${name}\\s*=\\s*"[^"]*"`);
+  return re.test(tag) ? tag.replace(re, `${name}="${value}"`) : tag.replace(/\/?>$/, (end) => ` ${name}="${value}"${end}`);
+}
+
+interface XliffUnit {
+  id: string;
+  attrsRaw: string;
+  translatable: boolean;
+  sourceInner: string;
+  targetInner?: string;
+  noteBlock: string;
+  whole: string;
+  /** The opening `<trans-unit>` tag's own indent, so a regenerated unit matches its actual nesting depth, not a single document-wide guess. */
+  indent: string;
+}
+type XliffSegment = { text: string } | { unit: number };
+
+/** Splits XLIFF text into literal passthrough segments and parsed `<trans-unit>` entries, ignoring the surrounding `<file>`/`<body>`/`<group>` nesting (it's never rewritten, just reproduced). */
+function parseXliffUnits(text: string): { segments: XliffSegment[]; units: XliffUnit[] } {
+  const unitRe = /<trans-unit\b([^>]*)>([\s\S]*?)<\/trans-unit>/g;
+  const segments: XliffSegment[] = [];
+  const units: XliffUnit[] = [];
+  let last = 0;
+  for (const m of text.matchAll(unitRe)) {
+    const before = text.slice(last, m.index);
+    segments.push({ text: before });
+    const [whole, attrsRaw, inner] = m;
+    const idMatch = /\bid="([^"]*)"/.exec(attrsRaw);
+    const sourceMatch = /<source\b[^>]*>([\s\S]*?)<\/source>/.exec(inner);
+    if (!idMatch || !sourceMatch) {
+      segments.push({ text: whole });
+    } else {
+      const targetMatch = /<target\b[^>]*>([\s\S]*?)<\/target>/.exec(inner);
+      const noteMatch = /<note\b[^>]*>[\s\S]*?<\/note>/.exec(inner);
+      const translatable = !/\btranslate\s*=\s*"no"/.test(attrsRaw) && !/<(?:bpt|ept)\b/.test(sourceMatch[1]);
+      const lineIndent = /[ \t]*$/.exec(before)![0];
+      units.push({
+        id: unescapeXml(idMatch[1]),
+        attrsRaw,
+        translatable,
+        sourceInner: sourceMatch[1],
+        targetInner: targetMatch?.[1],
+        noteBlock: noteMatch?.[0] ?? "",
+        whole,
+        indent: before.includes("\n") ? lineIndent : "",
+      });
+      segments.push({ unit: units.length - 1 });
+    }
+    last = m.index! + whole.length;
+  }
+  segments.push({ text: text.slice(last) });
+  return { segments, units };
+}
+
+/**
+ * XLIFF 1.2 (`<xliff version="1.2">`, the default for Qt Linguist, Angular's
+ * `ng extract-i18n`, and most CAT tools): each `<trans-unit id="...">` holds a
+ * `<source>` (always present) and a `<target>` (present once translated). A unit's
+ * inline markup — Angular's `<x id="INTERPOLATION" .../>`, or a generic `<g id="1">
+ * ... </g>` — is carried through to translation as literal text rather than stripped:
+ * it's exactly the shape `placeholders.ts` already protects for HTML-ish i18n values
+ * (`<b>`, `<Trans/>`), so it survives untouched with zero extra code. `translate="no"`
+ * units, and the rarer `<bpt>`/`<ept>` paired-tag markup (a different, non-nesting
+ * convention XLIFF also allows but modern tools rarely emit), are left completely
+ * untouched instead. `<note>` comments are kept from the source.
+ *
+ * Like Android/ARB/`.xcstrings`, this regenerates each unit from the *source's* own
+ * structure every run rather than editing an existing target in place — a translator's
+ * own `<target state="...">` attribute (if any) won't survive a rerun, the same
+ * documented tradeoff Android already makes for its own comments.
+ *
+ * Only reached via `--input <file>.xlf`/`.xliff`: the source file's name carries no
+ * locale tag at all (XLIFF puts it in `source-language` instead), so there's no
+ * filename convention to auto-detect from.
+ */
+function readXliffDoc(file: string, text: string, isSource: boolean): LocaleDoc {
+  if (!/<file\b[^>]*>/.test(text)) throw new Error(`Invalid XLIFF in ${file}: no <file> element found.`);
+  const { segments, units } = parseXliffUnits(text);
+  const data = newObj();
+  for (const u of units) {
+    if (!u.translatable) continue;
+    const v = isSource ? u.sourceInner : u.targetInner;
+    if (v !== undefined) data[u.id] = unescapeXml(v);
+  }
+  const step = /\r?\n([ \t]+)</.exec(text)?.[1] ?? "    ";
+  const keepNewline = finalNewline(text);
+  const serialize = (d: unknown, targetTag: string): string => {
+    const obj = isObj(d) ? d : newObj();
+    let patchedFileTag = false;
+    const parts = segments.map((seg) => {
+      if ("text" in seg) {
+        if (!patchedFileTag && /<file\b[^>]*>/.test(seg.text)) {
+          patchedFileTag = true;
+          return seg.text.replace(/<file\b[^>]*>/, (tag) => setXmlAttr(tag, "target-language", targetTag));
+        }
+        return seg.text;
+      }
+      const u = units[seg.unit];
+      if (!u.translatable) return u.whole;
+      const v = typeof obj[u.id] === "string" ? (obj[u.id] as string) : "";
+      const inner = u.indent + step;
+      const noteLine = u.noteBlock ? `\n${inner}${u.noteBlock}` : "";
+      return `<trans-unit${u.attrsRaw}>\n${inner}<source>${u.sourceInner}</source>\n${inner}<target>${escapeXmlKeepTags(v)}</target>${noteLine}\n${u.indent}</trans-unit>`;
+    });
+    return withNewline(parts.join(""), keepNewline);
   };
   return { data, serialize };
 }
@@ -1043,6 +1206,7 @@ export function readLocaleDoc(file: string, tag: string, isSource = false, fuzzy
   if (ext === ".properties") return readPropertiesDoc(file, text);
   if (ext === ".xml") return readAndroidXmlDoc(file, text);
   if (ext === ".xcstrings") return readXcstringsDoc(file, text, tag, isSource);
+  if (ext === ".xlf" || ext === ".xliff") return readXliffDoc(file, text, isSource);
   return readJsonDoc(file, text);
 }
 
