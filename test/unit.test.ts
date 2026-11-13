@@ -751,6 +751,78 @@ test("Apple .strings: a UTF-16 (BOM) file is read like a UTF-8 one", () => {
   assert.equal(JSON.stringify(readLocaleDoc(be, "fr").data), '{"greeting":"Café!","farewell":"Goodbye"}');
 });
 
+test("Java .properties: detection (bare and prefixed), region qualifier uses an underscore, not a hyphen", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-properties-"));
+  fs.writeFileSync(path.join(root, "messages_en.properties"), "greeting=Hi\n");
+
+  const l = detectLayout(root, "en");
+  assert.deepEqual(l, { kind: "file", root, ext: ".properties", prefix: "messages" });
+  const files = sourceFiles(l, "en");
+  assert.deepEqual(files, [path.join(root, "messages_en.properties")]);
+  assert.equal(targetFile(l, "en", "fr", files[0]), path.join(root, "messages_fr.properties"));
+  assert.equal(targetFile(l, "en", "pt-BR", files[0]), path.join(root, "messages_pt_BR.properties"));
+
+  fs.writeFileSync(path.join(root, "messages_pt_BR.properties"), "greeting=Oi\n");
+  assert.deepEqual(existingTargets(l, "en"), ["pt-BR"]);
+
+  // A bare "en.properties" (no app-name prefix) is also detected.
+  const root2 = fs.mkdtempSync(path.join(os.tmpdir(), "lai-properties-bare-"));
+  fs.writeFileSync(path.join(root2, "en.properties"), "greeting=Hi\n");
+  assert.deepEqual(detectLayout(root2, "en"), { kind: "file", root: root2, ext: ".properties" });
+});
+
+test("Java .properties: comments/continuation/escapes on read; in-place edit on rerun keeps untouched lines and a hand-added comment", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-properties-rw-"));
+  const file = path.join(root, "en.properties");
+  const text = `# App messages
+! legacy bang-comment too
+
+greeting=Hello, world!
+app.title: My App
+long.value=This is a very long \\
+    continued value
+leading.space=\\ padded
+`;
+  fs.writeFileSync(file, text);
+  const doc = readLocaleDoc(file, "en", true);
+  assert.equal(
+    JSON.stringify(doc.data),
+    JSON.stringify({
+      greeting: "Hello, world!",
+      "app.title": "My App",
+      "long.value": "This is a very long continued value",
+      "leading.space": " padded",
+    }),
+  );
+
+  const translated = {
+    greeting: "[FR] Hello, world!",
+    "app.title": "[FR] My App",
+    "long.value": "[FR] long value",
+    "leading.space": "[FR]  padded",
+  };
+  const out = doc.serialize(translated, "fr");
+  assert.equal(
+    out,
+    `# App messages
+! legacy bang-comment too
+
+greeting=[FR] Hello, world!
+app.title: [FR] My App
+long.value=[FR] long value
+leading.space=[FR]  padded
+`,
+  );
+
+  // A hand-added comment and untouched values survive a no-op rerun.
+  const edited = out.replace("greeting=", "# translator note\ngreeting=");
+  const rebuilt = buildTarget(doc.data, JSON.parse(JSON.stringify(translated)), () => {
+    throw new Error("should not translate anything on a no-op rerun");
+  }, false);
+  const rerun = doc.serialize(rebuilt, "fr", edited);
+  assert.equal(rerun, edited);
+});
+
 test("ARB: @key metadata and @@locale are not translatable and are reinserted; @@locale follows the target", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-arb-"));
   const file = path.join(root, "en.arb");

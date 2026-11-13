@@ -10,11 +10,11 @@ import { parseLocale } from "./lang.ts";
  *   android:    <root>/values/strings.xml                         ->  <root>/values-fr/strings.xml
  *   xcstrings:  <file>.xcstrings (every locale, source included, lives inside this one file)
  *
- * dir and file both accept ".json", ".yaml", ".yml", ".po", ".arb" or ".strings"
- * files, independently per file. android is its own thing: the file is always named
- * "strings.xml", and the locale lives in the untagged "values" (source) vs.
- * "values-<qualifier>" (target) directory name instead of the file name. xcstrings is
- * the odd one out: there's no per-locale file to find, so it's only ever reached via
+ * dir and file both accept ".json", ".yaml", ".yml", ".po", ".arb", ".strings" or
+ * ".properties" files, independently per file. android is its own thing: the file is
+ * always named "strings.xml", and the locale lives in the untagged "values" (source)
+ * vs. "values-<qualifier>" (target) directory name instead of the file name. xcstrings
+ * is the odd one out: there's no per-locale file to find, so it's only ever reached via
  * an explicit `--input <file>.xcstrings` rather than auto-detected from CANDIDATES.
  */
 export interface Layout {
@@ -30,7 +30,15 @@ export interface Layout {
   file?: string;
 }
 
-const EXTENSIONS = [".json", ".yaml", ".yml", ".po", ".pot", ".arb", ".strings"];
+const EXTENSIONS = [".json", ".yaml", ".yml", ".po", ".pot", ".arb", ".strings", ".properties"];
+
+/**
+ * Java's `ResourceBundle` convention names a region-qualified `.properties` file
+ * "fr_FR", not this project's BCP-47 "fr-FR" everywhere else — so the tag is
+ * underscore-joined only at the filename boundary, for this one extension.
+ */
+const propertiesTag = (ext: string, tag: string) => (ext === ".properties" ? tag.replace("-", "_") : tag);
+const tagFromPropertiesQualifier = (ext: string, qualifier: string) => (ext === ".properties" ? qualifier.replace("_", "-") : qualifier);
 
 const CANDIDATES = [
   "locales",
@@ -77,19 +85,20 @@ const isFile = (p: string) => fs.existsSync(p) && fs.statSync(p).isFile();
 
 /** The source-locale file's extension, if `<root>/<from><ext>` exists for one of EXTENSIONS. */
 function fileExtAt(root: string, from: string): string | undefined {
-  return EXTENSIONS.find((ext) => isFile(path.join(root, `${from}${ext}`)));
+  return EXTENSIONS.find((ext) => isFile(path.join(root, `${propertiesTag(ext, from)}${ext}`)));
 }
 
 /**
  * A prefixed source-locale file, if `<root>/<prefix>_<from><ext>` exists for one of
- * EXTENSIONS — the convention `flutter gen-l10n` uses by default ("app_en.arb").
+ * EXTENSIONS — the convention `flutter gen-l10n` uses by default ("app_en.arb"), and
+ * also how a Java `ResourceBundle` basename ("messages_en.properties") is found.
  */
 function prefixedFileAt(root: string, from: string): { ext: string; prefix: string } | undefined {
   if (!isDir(root)) return undefined;
   for (const entry of fs.readdirSync(root)) {
     if (!isFile(path.join(root, entry))) continue;
     for (const ext of EXTENSIONS) {
-      const suffix = `_${from}${ext}`;
+      const suffix = `_${propertiesTag(ext, from)}${ext}`;
       if (entry.endsWith(suffix) && entry.length > suffix.length) {
         return { ext, prefix: entry.slice(0, -suffix.length) };
       }
@@ -118,7 +127,8 @@ function layoutAt(root: string, from: string): Layout | undefined {
 }
 
 const dirNameFor = (layout: Layout, tag: string) => `${tag}${layout.dirSuffix ?? ""}`;
-const fileNameFor = (layout: Layout, tag: string, ext: string) => `${layout.prefix ? `${layout.prefix}_` : ""}${tag}${ext}`;
+const fileNameFor = (layout: Layout, tag: string, ext: string) =>
+  `${layout.prefix ? `${layout.prefix}_` : ""}${propertiesTag(ext, tag)}${ext}`;
 
 export function detectLayout(cwd: string, from: string, input?: string): Layout {
   if (input) {
@@ -145,11 +155,14 @@ export function detectLayout(cwd: string, from: string, input?: string): Layout 
       return { kind: "xcstrings", root: path.dirname(abs), file: abs };
     }
     const base = path.basename(abs);
-    const directExt = EXTENSIONS.find((ext) => base === `${from}${ext}`);
+    const directExt = EXTENSIONS.find((ext) => base === `${propertiesTag(ext, from)}${ext}`);
     if (directExt && isFile(abs)) return { kind: "file", root: path.dirname(abs), ext: directExt };
-    const prefixedExt = EXTENSIONS.find((ext) => base.endsWith(`_${from}${ext}`) && base.length > `_${from}${ext}`.length);
+    const prefixedExt = EXTENSIONS.find((ext) => {
+      const suffix = `_${propertiesTag(ext, from)}${ext}`;
+      return base.endsWith(suffix) && base.length > suffix.length;
+    });
     if (prefixedExt && isFile(abs)) {
-      const suffix = `_${from}${prefixedExt}`;
+      const suffix = `_${propertiesTag(prefixedExt, from)}${prefixedExt}`;
       return { kind: "file", root: path.dirname(abs), ext: prefixedExt, prefix: base.slice(0, -suffix.length) };
     }
     const l = layoutAt(abs, from);
@@ -237,9 +250,9 @@ export function existingTargets(layout: Layout, from: string): string[] {
     const prefix = layout.prefix ? `${layout.prefix}_` : "";
     return fs
       .readdirSync(layout.root)
-      .filter((f) => f.startsWith(prefix) && f.endsWith(ext) && f.slice(prefix.length, -ext.length) !== from)
-      .map((f) => f.slice(prefix.length, -ext.length))
-      .filter(looksLikeLocale)
+      .filter((f) => f.startsWith(prefix) && f.endsWith(ext))
+      .map((f) => tagFromPropertiesQualifier(ext, f.slice(prefix.length, -ext.length)))
+      .filter((tag) => tag !== from && looksLikeLocale(tag))
       .sort();
   }
   const suffix = layout.dirSuffix ?? "";
@@ -395,6 +408,111 @@ function readStringsDoc(file: string, text: string): LocaleDoc {
       blocks.push(`"${escapeC(k)}" = "${escapeC(obj[k] as string)}";`);
     }
     return withNewline(blocks.join("\n\n"), keepNewline);
+  };
+  return { data, serialize };
+}
+
+/** Java `.properties`: `\n`, `\t`, `\r`, `\f`, `\\` and `\uXXXX` escapes, plus an escaped separator/leading-space. */
+function unescapeProperties(s: string): string {
+  return s.replace(/\\(u[0-9a-fA-F]{4}|.)/gs, (_m, esc: string) => {
+    if (esc[0] === "u" && esc.length === 5) return String.fromCharCode(parseInt(esc.slice(1), 16));
+    return ({ n: "\n", t: "\t", r: "\r", f: "\f" } as Record<string, string>)[esc] ?? esc;
+  });
+}
+function escapeProperties(s: string): string {
+  let out = s.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\t/g, "\\t").replace(/\r/g, "\\r");
+  if (out[0] === " ") out = `\\${out}`;
+  return out;
+}
+
+/** True when `s` ends in an odd run of backslashes — Java's line-continuation rule. */
+const endsWithContinuation = (s: string) => (/\\*$/.exec(s)![0].length % 2 === 1);
+
+/** Splits `key<ws>?[=:]<ws>?value` at the first unescaped `=`/`:`, skipping `\X` pairs. Undefined if there's none (a key-only or malformed line). */
+function splitPropertyLine(line: string): { key: string; valueStart: number } | undefined {
+  let i = 0;
+  while (i < line.length) {
+    const c = line[i];
+    if (c === "\\") {
+      i += 2;
+      continue;
+    }
+    if (c === "=" || c === ":") {
+      const key = unescapeProperties(line.slice(0, i).trimEnd());
+      let v = i + 1;
+      while (v < line.length && (line[v] === " " || line[v] === "\t")) v++;
+      return { key, valueStart: v };
+    }
+    i++;
+  }
+  return undefined;
+}
+
+type PropBlock = { text: string } | { key: string; prefix: string };
+
+/** Parses `.properties` text into passthrough lines (comments, blank lines, unparsable lines) and key/value entries. */
+function parsePropertiesBlocks(text: string): { blocks: PropBlock[]; data: Obj } {
+  const physical = text.split(/\r?\n/);
+  const blocks: PropBlock[] = [];
+  const data = newObj();
+  let i = 0;
+  while (i < physical.length) {
+    const line = physical[i];
+    const trimmedStart = line.replace(/^[ \t\f]+/, "");
+    if (trimmedStart === "" || trimmedStart[0] === "#" || trimmedStart[0] === "!") {
+      blocks.push({ text: line });
+      i++;
+      continue;
+    }
+    const split = splitPropertyLine(line);
+    if (!split) {
+      blocks.push({ text: line });
+      i++;
+      continue;
+    }
+    let valueRaw = line.slice(split.valueStart);
+    while (endsWithContinuation(valueRaw) && i + 1 < physical.length) {
+      valueRaw = valueRaw.slice(0, -1) + physical[++i].replace(/^[ \t\f]+/, "");
+    }
+    data[split.key] = unescapeProperties(valueRaw);
+    blocks.push({ key: split.key, prefix: line.slice(0, split.valueStart) });
+    i++;
+  }
+  return { blocks, data };
+}
+
+/**
+ * Java `ResourceBundle` `.properties`: a flat `key=value` (or `key: value`) list, one
+ * per line, `#`/`!` line comments, `\`-continued multi-line values, and `\uXXXX`/`\n`/
+ * `\t` escapes. There's no plural or array convention of its own — a value containing
+ * ICU `{count, plural, ...}` syntax is still handled generically by the ICU extractor
+ * elsewhere, same as any other format.
+ *
+ * Unlike Android/ARB/`.xcstrings` (which regenerate the whole file from the source's
+ * own structure every run), this edits an existing target file's lines in place, the
+ * same as YAML/`.po`: untouched entries, comments and blank lines keep their exact
+ * text and position, and a value that didn't change is never rewritten. A multi-line
+ * (`\`-continued) value is always collapsed to one line when it's rewritten, though —
+ * only an *unchanged* continued value keeps its original multi-line layout. A line
+ * with no unescaped `=`/`:` at all (so not a recognizable `key=value` pair) is passed
+ * through untouched rather than guessed at.
+ */
+function readPropertiesDoc(file: string, text: string): LocaleDoc {
+  const { blocks, data } = parsePropertiesBlocks(text);
+  const serialize = (d: unknown, _targetTag: string, existingText?: string): string => {
+    const obj = isObj(d) ? d : newObj();
+    const baseBlocks = existingText !== undefined ? parsePropertiesBlocks(existingText).blocks : blocks;
+    const seen = new Set<string>();
+    const lines = baseBlocks.map((b) => {
+      if (!("key" in b)) return b.text;
+      seen.add(b.key);
+      return `${b.prefix}${escapeProperties(typeof obj[b.key] === "string" ? (obj[b.key] as string) : "")}`;
+    });
+    for (const k of Object.keys(obj)) {
+      if (seen.has(k) || typeof obj[k] !== "string") continue;
+      lines.push(`${k}=${escapeProperties(obj[k] as string)}`);
+    }
+    return lines.join("\n");
   };
   return { data, serialize };
 }
@@ -922,6 +1040,7 @@ export function readLocaleDoc(file: string, tag: string, isSource = false, fuzzy
   if (ext === ".po" || ext === ".pot") return readPoDoc(file, text, isSource, fuzzy);
   if (ext === ".arb") return readArbDoc(file, text);
   if (ext === ".strings") return readStringsDoc(file, text);
+  if (ext === ".properties") return readPropertiesDoc(file, text);
   if (ext === ".xml") return readAndroidXmlDoc(file, text);
   if (ext === ".xcstrings") return readXcstringsDoc(file, text, tag, isSource);
   return readJsonDoc(file, text);
