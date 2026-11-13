@@ -13,8 +13,11 @@ import { test } from "node:test";
 import { hasOtherConsumer, isPnpmVirtualStore, rootDependsOnOnnx } from "../scripts/trim-onnxruntime.cjs";
 
 test("isPnpmVirtualStore: detects node_modules/.pnpm/<pkg>/node_modules/<pkg>, not a real node_modules", () => {
-  assert.equal(isPnpmVirtualStore("/proj/node_modules/.pnpm/onnxruntime-node@1.0.0/node_modules/onnxruntime-node"), true);
-  assert.equal(isPnpmVirtualStore("/proj/node_modules/onnxruntime-node"), false);
+  assert.equal(
+    isPnpmVirtualStore(path.join("/proj", "node_modules", ".pnpm", "onnxruntime-node@1.0.0", "node_modules", "onnxruntime-node")),
+    true,
+  );
+  assert.equal(isPnpmVirtualStore(path.join("/proj", "node_modules", "onnxruntime-node")), false);
 });
 
 test("hasOtherConsumer: finds a sibling package that depends on onnxruntime-node, ignores locale-ai itself", () => {
