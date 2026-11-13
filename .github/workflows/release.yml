@@ -5,33 +5,72 @@ on:
     tags:
       - "v*.*.*"
 
-permissions:
-  contents: write
-  id-token: write
-
 jobs:
-  publish:
+  build:
+    # Deliberately NO elevated permissions here: this job runs `npm ci`, which executes
+    # arbitrary third-party `postinstall` scripts — the exact step a supply-chain attack on
+    # any dependency would land in. Keeping it in an unprivileged job, and handing only a
+    # pre-built tarball to the privileged `publish` job below, means that attack surface
+    # never has access to contents:write or id-token:write.
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      # Actions are pinned to a commit SHA, not a version tag: a tag can be
-      # moved by the action's maintainer (or an attacker who compromises
-      # their account), and this job holds id-token: write.
+      # Actions are pinned to a commit SHA, not a version tag, here and in `publish` below:
+      # a tag can be moved by the action's maintainer (or an attacker who compromises their
+      # account), and `publish` holds contents:write and id-token:write.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.x
           cache: npm
+
+      # A tag pushed out of sync with the version bump (forgotten bump, tag pushed from the
+      # wrong commit) would otherwise publish under the wrong version with no failure.
+      - name: Verify tag matches package.json version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg_version" ]; then
+            echo "Tag v$tag does not match package.json version $pkg_version" >&2
+            exit 1
+          fi
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: npm pack
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-tarball
+          path: "*.tgz"
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-tarball
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
           registry-url: https://registry.npmjs.org
 
       # Trusted Publishing (OIDC) needs npm >= 11.5.1; the runner's bundled
       # npm may be older, so pin an up-to-date one explicitly.
       - run: npm install -g npm@^11
 
-      - run: npm ci
-      - run: npm run build
-      - run: npm test
-
-      - run: npm publish --provenance
+      # Publishing the tarball built in the unprivileged job above, rather than running
+      # `npm ci`/`npm pack` again here, means nothing in this job — which holds
+      # contents:write and id-token:write — ever executes a dependency's install scripts.
+      - run: npm publish --provenance ./*.tgz
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4

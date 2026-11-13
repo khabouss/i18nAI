@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.9
+
+Four more gaps from the same external review, verified with reproductions before fixing ([khabouss/locale-ai#12](https://github.com/khabouss/locale-ai/issues/12)):
+
+- **The onnxruntime-node trimmer's "other consumer" check couldn't see a pnpm virtual store.** Under pnpm, `require.resolve` follows the symlink straight into `node_modules/.pnpm/onnxruntime-node@<version>/node_modules/`, which only ever contains onnxruntime-node itself — a real sibling consumer symlinked into the project's actual top-level `node_modules` was invisible to the scan. Trimming is now skipped entirely when a pnpm virtual store is detected, rather than risk a false "no other consumer".
+- **The check never looked at the consuming project's own `package.json`**, only at sibling packages inside `node_modules` — a project that directly depends on onnxruntime-node itself (for its own GPU use) had it trimmed anyway. The root manifest is now checked too.
+- **`release.yml` never verified the pushed tag matches `package.json`'s version**, so a tag pushed out of sync with the version bump would publish under the wrong version with no failure. It's now checked before anything else runs.
+- **`release.yml` ran `npm ci` (arbitrary third-party `postinstall` scripts) in the same job that held `contents: write` and `id-token: write`.** Dependency install, build, and test now run in a separate, unprivileged job that hands only a pre-built tarball to a minimal `publish` job — the only one that holds those permissions, and the only one that touches the registry.
+
 ## 0.7.8
 
 Five more parsing/engine bugs from the same external review, verified with reproductions before fixing ([khabouss/locale-ai#10](https://github.com/khabouss/locale-ai/issues/10)):
