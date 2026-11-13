@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1
+
+- **`npm install` could fail entirely on a network that can't reach `api.nuget.org`** — `onnxruntime-node`'s own postinstall tries to download a ~260 MB CUDA provider locale-ai never uses (CPU only), and that download failing took the whole install down with it, which is common behind corporate proxies and in locked-down CI. The README now documents `ONNXRUNTIME_NODE_INSTALL=skip npm install locale-ai` to skip it up front (also a faster install either way: ~51 MB / ~3s). As defense in depth, locale-ai now also re-runs its own CUDA-provider cleanup on every CLI invocation, not just at install time, since npm doesn't guarantee the postinstall that's meant to remove it runs after onnxruntime-node's own download finishes.
+
 ## 0.7.0
 
 Fixes to `locale-ai.lock.json`, the incremental-translation lock file, found by an external review that ran the CLI end-to-end against real cached models:

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import {
@@ -588,7 +589,26 @@ async function cmdCheck(argv: string[]): Promise<number> {
   return problems ? 1 : 0;
 }
 
+/**
+ * Re-runs scripts/trim-onnxruntime.cjs's cleanup on every invocation, not just
+ * at install time: npm doesn't guarantee that script (locale-ai's own
+ * postinstall) runs after onnxruntime-node's own postinstall has finished
+ * downloading the ~260 MB CUDA provider it's meant to remove, so that file
+ * can still be sitting there right after `npm install`. This repeat is cheap
+ * (a handful of fs checks once the first trim has already run) and catches
+ * that race. Best-effort: never allowed to fail a command over this.
+ */
+function repeatTrim(): void {
+  try {
+    const script = fileURLToPath(new URL("../scripts/trim-onnxruntime.cjs", import.meta.url));
+    (createRequire(import.meta.url)(script) as { trim: () => void }).trim();
+  } catch {
+    // ignore — best-effort only
+  }
+}
+
 async function main(): Promise<number> {
+  repeatTrim();
   const [cmd, ...rest] = process.argv.slice(2);
   switch (cmd) {
     case "translate":

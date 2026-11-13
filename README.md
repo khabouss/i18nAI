@@ -26,6 +26,12 @@ Download 577 MB? (Y/n)
 ✓ de         43 strings translated, 3 files written in 2.1s
 ```
 
+> **Behind a proxy or in locked-down CI?** `npm install` pulls in `onnxruntime-node`, which tries to download a ~260&nbsp;MB CUDA provider locale-ai never uses (it only ever runs on CPU) — on a network that can't reach `api.nuget.org`, that download failing takes the whole install down with it. Skip it with:
+> ```bash
+> ONNXRUNTIME_NODE_INSTALL=skip npm install locale-ai
+> ```
+> That's also the faster way to install even with a good connection — about 51&nbsp;MB and 3 seconds instead of several hundred MB. locale-ai re-checks for (and removes) that CUDA provider on every run too, in case it slipped in anyway.
+
 ## Why locale-ai?
 
 - **No API keys, no cloud bill.** Google/DeepL/OpenAI-based translation tools work well but mean an account, a key, a per-character cost, and your strings leaving your machine. locale-ai runs the model on your own CPU.

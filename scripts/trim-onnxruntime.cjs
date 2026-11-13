@@ -20,6 +20,13 @@
 //
 // Best-effort: never fails the install, even if onnxruntime-node changes
 // its layout in a future version.
+//
+// Also exported as `trim()` and called again on every `locale-ai` CLI
+// invocation (see src/cli.ts): npm doesn't guarantee this postinstall script
+// runs after onnxruntime-node's own postinstall finishes downloading that
+// CUDA provider (observed in practice with `--foreground-scripts`), so the
+// file can still be there right after install. Calling trim() again at CLI
+// startup is cheap (a handful of fs checks) and catches that race.
 
 const fs = require('fs');
 const path = require('path');
@@ -61,38 +68,44 @@ function hasOtherConsumer(nodeModulesDir) {
   return false;
 }
 
-if (process.env.LOCALE_AI_SKIP_TRIM) process.exit(0);
+function trim() {
+  if (process.env.LOCALE_AI_SKIP_TRIM) return;
 
-try {
-  const pkgJson = require.resolve('onnxruntime-node/package.json');
-  const onnxRoot = path.dirname(pkgJson);
-  const nodeModulesDir = path.dirname(onnxRoot);
-  if (hasOtherConsumer(nodeModulesDir)) process.exit(0);
+  try {
+    const pkgJson = require.resolve('onnxruntime-node/package.json');
+    const onnxRoot = path.dirname(pkgJson);
+    const nodeModulesDir = path.dirname(onnxRoot);
+    if (hasOtherConsumer(nodeModulesDir)) return;
 
-  const binRoot = path.join(onnxRoot, 'bin', 'napi-v6');
-  if (!fs.existsSync(binRoot)) process.exit(0);
+    const binRoot = path.join(onnxRoot, 'bin', 'napi-v6');
+    if (!fs.existsSync(binRoot)) return;
 
-  const platform = process.platform;
-  const arch = process.arch;
+    const platform = process.platform;
+    const arch = process.arch;
 
-  for (const entry of fs.readdirSync(binRoot)) {
-    const platformDir = path.join(binRoot, entry);
-    if (entry !== platform) {
-      rm(platformDir);
-      continue;
-    }
-    // Same platform: drop every other architecture.
-    for (const archEntry of fs.readdirSync(platformDir)) {
-      if (archEntry !== arch) rm(path.join(platformDir, archEntry));
-    }
-    // Drop GPU execution providers locale-ai never requests.
-    const archDir = path.join(platformDir, arch);
-    for (const name of fs.readdirSync(archDir)) {
-      if (/^libonnxruntime_providers_(cuda|tensorrt|rocm|dml)\./.test(name)) {
-        rm(path.join(archDir, name));
+    for (const entry of fs.readdirSync(binRoot)) {
+      const platformDir = path.join(binRoot, entry);
+      if (entry !== platform) {
+        rm(platformDir);
+        continue;
+      }
+      // Same platform: drop every other architecture.
+      for (const archEntry of fs.readdirSync(platformDir)) {
+        if (archEntry !== arch) rm(path.join(platformDir, archEntry));
+      }
+      // Drop GPU execution providers locale-ai never requests.
+      const archDir = path.join(platformDir, arch);
+      for (const name of fs.readdirSync(archDir)) {
+        if (/^libonnxruntime_providers_(cuda|tensorrt|rocm|dml)\./.test(name)) {
+          rm(path.join(archDir, name));
+        }
       }
     }
+  } catch {
+    // onnxruntime-node not installed, or its layout changed — nothing to do.
   }
-} catch {
-  // onnxruntime-node not installed, or its layout changed — nothing to do.
 }
+
+module.exports = { trim };
+
+if (require.main === module) trim();
