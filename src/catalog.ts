@@ -28,9 +28,10 @@ export interface ModelEntry {
   prefix?: (target: Locale) => string;
   /**
    * Commit this repo is pinned to, so every install gets the exact same files
-   * instead of silently following wherever the repo's "main" branch goes next.
-   * Undefined resolves "main" at install time, as every model used to (still the
-   * case for this project's own `khabouss/*` repos — see PINNED_REVISIONS below).
+   * instead of silently following wherever the repo's "main" branch goes next
+   * (every built-in model is pinned — see PINNED_REVISIONS below). Undefined
+   * resolves "main" at install time; only reachable for a project's own custom
+   * `models` config entry, which has no pin of its own.
    */
   revision?: string;
 }
@@ -62,14 +63,15 @@ const DIRECT = [
 const ROMANCE = ["es", "pt", "ca", "gl", "oc", "it", "ro", "fr"];
 
 /**
- * Every third-party repo this catalog downloads from, pinned to the commit that was
- * current when each pair was added — so every install gets the exact same files
- * instead of silently picking up whatever Xenova's "main" branch has moved to by
- * then, with no changelog entry or version bump on our side to explain why
- * translations changed. This project's own `khabouss/*` repos are deliberately left
- * out: we only ever change those ourselves, so there's no silent-drift risk to
- * guard against, and pinning them would just mean remembering to bump a SHA by hand
- * every time a better conversion is published.
+ * Every repo this catalog downloads from — Xenova's and this project's own
+ * `khabouss/*` alike — pinned to the commit that was current when each pair was
+ * added (or last re-pinned), so every install gets the exact same files instead of
+ * silently following wherever a repo's "main" branch moves to next, with no
+ * changelog entry or version bump on our side to explain why translations changed.
+ * This also covers a compromised or merely careless upload to one of our own repos:
+ * it can't silently reach installed users either. The cost is that publishing a
+ * better `khabouss/*` conversion means also bumping its entry here as part of that
+ * same release — a deliberate tradeoff, not an oversight.
  */
 const PINNED_REVISIONS: Record<string, string> = {
   "Xenova/opus-mt-ROMANCE-en": "f60feaabe8bb435a5871e7702b25f53a01e770f8",
@@ -136,13 +138,21 @@ const PINNED_REVISIONS: Record<string, string> = {
   "Xenova/opus-mt-vi-en": "541dfd72ec07e8f1563795e0224408ad8d729e80",
   "Xenova/opus-mt-xh-en": "f2950c1503ae17ba532ea858914ea13838bc2ab1",
   "Xenova/opus-mt-zh-en": "39d480d52a9ea3065a1f117adfe4dbc55de10e6f",
+  "khabouss/opus-mt-tc-big-en-fr-onnx": "9918f53b1e4f418cba1356c372e4b9609186b6f5",
+  "khabouss/opus-mt-tc-big-en-es-onnx": "064225d59b49d0576d146ddb2d614bc4f4bb3064",
+  "khabouss/opus-mt-tc-big-en-it-onnx": "622b8d6756434a6098d42d38a0102f4d707f20de",
+  "khabouss/opus-mt-tc-big-en-tr-onnx": "c0990f0849820af39f7c3ebdf6d0397c8cc98636",
+  "khabouss/opus-mt-tc-big-en-pt-onnx": "0a2c1eee261899b161f3dc62ab1d085f630b2555",
+  "khabouss/opus-mt-tc-big-en-zle-onnx": "189d0095a48a85f47e5a62a648fbe451ff01e6c1",
+  "khabouss/opus-mt-en-sla-onnx": "0552b42699fde609980b57ff1f7a2af3ca2e2145",
+  "khabouss/opus-mt-tc-big-en-ar-onnx": "b5a4f26d632c3bfbbd38a007b4c62d193382f156",
 };
 
 /** Applies PINNED_REVISIONS by the entry's final `repo` (after any override), not by where `pair()` first pointed it. */
 function pinned(entries: ModelEntry[]): ModelEntry[] {
   return entries.map((m) => ({
     ...m,
-    revision: m.repo && !m.repo.startsWith("khabouss/") ? PINNED_REVISIONS[m.repo] : undefined,
+    revision: m.repo ? PINNED_REVISIONS[m.repo] : undefined,
   }));
 }
 

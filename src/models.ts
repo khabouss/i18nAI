@@ -146,7 +146,19 @@ async function fetchWithRetry(url: string, attempts = 3): Promise<Response> {
     }
     await new Promise((r) => setTimeout(r, 500 * 2 ** i));
   }
-  throw new Error(`Download failed: ${last instanceof Error ? last.message : String(last)}`);
+  let host: string;
+  try {
+    host = new URL(url).host;
+  } catch {
+    host = url;
+  }
+  // Node's fetch wraps the real network error (ENOTFOUND, blocked by a proxy, ...) in
+  // `.cause`, so the generic top-level "fetch failed" message alone — with no host
+  // named — is the least useful part of it.
+  const cause = last instanceof Error && last.cause instanceof Error ? last.cause : undefined;
+  const detail = cause ? `${last instanceof Error ? last.message : ""}: ${cause.message}` : last instanceof Error ? last.message : String(last);
+  const mirrorHint = HF.includes("huggingface.co") ? ` If ${host} is blocked on this network, set HF_ENDPOINT to a mirror.` : "";
+  throw new Error(`Download failed: could not reach ${host} (${detail}).${mirrorHint}`);
 }
 
 /** Resolves the exact files, sizes and checksums to download for a model. */

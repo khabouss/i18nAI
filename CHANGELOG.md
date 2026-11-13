@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.4
+
+The last three items from the same external review:
+
+- **The `_one` plural-grammar fix (retranslating with a literal "1" to get the right singular noun form) ran one separate, unbatched model call per plural key.** A project with hundreds of plural keys paid for every one of them individually. All qualifying keys are now retranslated in a single batched call, the same as every other translation pass.
+- **A download failure's error message didn't say which host it couldn't reach**, just a generic "fetch failed". It now names the host, surfaces the actual underlying network error, and — when using the default `huggingface.co` — suggests `HF_ENDPOINT` for a mirror.
+- **This project's own `khabouss/*` model repos were deliberately left unpinned** (documented rationale: "we only ever change those ourselves"). They're now pinned to a commit like every other built-in model, so a compromised account or a careless upload can't silently change installed users' translations either. This does mean remembering to bump the pin here when publishing a better conversion going forward.
+
 ## 0.7.3
 
 More from the same external review:

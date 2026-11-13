@@ -296,6 +296,10 @@ const COUNT_PLACEHOLDER = /\{\{\s*count\s*\}\}/;
  * {{count}} gives the model the real grammatical cue; only applied when {{count}} is the
  * string's only placeholder (anything else needs the normal masking pipeline to survive),
  * and only kept when the "1" survives translation intact enough to restore {{count}}.
+ *
+ * All qualifying keys are retranslated in one `runModels` call (which itself batches by
+ * `opts.batchSize`), not one model call per key — a project with hundreds of plural keys
+ * would otherwise pay for a separate, unbatched beam search per key here.
  */
 async function fixSingularGrammar(
   translations: Map<string, string>,
@@ -305,19 +309,24 @@ async function fixSingularGrammar(
   opts: EngineOptions,
   progress: Progress,
 ): Promise<void> {
+  const jobs: Array<{ source: string; pinned: string; prepared: string; marker: string }> = [];
   for (const s of singularHints) {
     if (!remaining.has(s) || translations.get(s) === undefined) continue;
     const tokens = mask(s, "natural").tokens;
     if (tokens.length !== 1 || !COUNT_PLACEHOLDER.test(tokens[0])) continue;
     const m = COUNT_PLACEHOLDER.exec(s)!;
     const pinned = s.slice(0, m.index) + "1" + s.slice(m.index + m[0].length);
-    const prepared = prepare(pinned);
-    const out = (await runModels(new Set([prepared]), hops, opts, progress)).get(prepared) ?? "";
+    jobs.push({ source: s, pinned, prepared: prepare(pinned), marker: m[0] });
+  }
+  if (!jobs.length) return;
+  const outputs = await runModels(new Set(jobs.map((j) => j.prepared)), hops, opts, progress);
+  for (const { source: s, pinned, prepared, marker } of jobs) {
+    const out = outputs.get(prepared) ?? "";
     if (isDegenerate(pinned, out)) continue;
     const post = postprocess(pinned, out, opts.targetLang);
     const restored = /(?<![\d.])1(?![\d.])/.exec(post);
     if (!restored) continue; // can't confirm the "1" survived: keep the original translation
-    translations.set(s, post.slice(0, restored.index) + m[0] + post.slice(restored.index + 1));
+    translations.set(s, post.slice(0, restored.index) + marker + post.slice(restored.index + 1));
   }
 }
 

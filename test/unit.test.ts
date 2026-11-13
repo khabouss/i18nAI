@@ -145,13 +145,11 @@ test("routes: direct, multi-target prefix, pivot, unsupported", () => {
   assert.ok(reachableTargets("en").includes("de"));
 });
 
-test("CATALOG: third-party repos are pinned to a commit, this project's own khabouss/* repos are not", () => {
+test("CATALOG: every repo (third-party and this project's own khabouss/*) is pinned to a commit", () => {
   const withRepo = CATALOG.filter((m) => m.repo);
   assert.ok(withRepo.length > 0);
-  for (const m of withRepo) {
-    if (m.repo!.startsWith("khabouss/")) assert.equal(m.revision, undefined, m.repo);
-    else assert.match(m.revision ?? "", /^[0-9a-f]{40}$/, m.repo);
-  }
+  assert.ok(withRepo.some((m) => m.repo!.startsWith("khabouss/")));
+  for (const m of withRepo) assert.match(m.revision ?? "", /^[0-9a-f]{40}$/, m.repo);
 });
 
 test("parseLocale normalizes tags", () => {
@@ -1412,6 +1410,38 @@ test("engine: an i18next _one string is retranslated with a literal 1, fixing th
     singularHints: new Set([source]),
   });
   assert.equal(withHint.translations.get(source), "Vous avez {{count}} fichier");
+});
+
+test("engine: several _one keys are retranslated in one batched model call, not one call per key", async () => {
+  let calls = 0;
+  const map: Record<string, string> = {
+    "You have {0} file": "Vous avez {0} fichiers",
+    "You have 1 file": "Vous avez 1 fichier",
+    "You have {0} photo": "Vous avez {0} photos",
+    "You have 1 photo": "Vous avez 1 photo",
+    "You have {0} video": "Vous avez {0} videos",
+    "You have 1 video": "Vous avez 1 video",
+  };
+  const counting: Translator = {
+    translate: async (texts) => {
+      calls++;
+      return texts.map((s) => map[s] ?? s);
+    },
+    dispose: async () => {},
+  };
+  const sources = ["You have {{count}} file", "You have {{count}} photo", "You have {{count}} video"];
+  const result = await translateStrings(sources, [counting], {
+    sourceLang: "en",
+    targetLang: "fr",
+    batchSize: 32,
+    singularHints: new Set(sources),
+  });
+  // One call for the main pass (all 3 strings, masked) + one batched call for all 3 "literal 1" retries —
+  // not a separate model call per singular-hint key.
+  assert.equal(calls, 2);
+  assert.equal(result.translations.get("You have {{count}} file"), "Vous avez {{count}} fichier");
+  assert.equal(result.translations.get("You have {{count}} photo"), "Vous avez {{count}} photo");
+  assert.equal(result.translations.get("You have {{count}} video"), "Vous avez {{count}} video");
 });
 
 test("custom models: config entries win over built-ins, prefixes per target", async () => {
