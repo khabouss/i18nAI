@@ -75,6 +75,8 @@ Translate options:
   --overwrite           Re-translate strings that already have a translation
   --dry-run             Show what would be translated without downloading or writing
   --fast                Greedy decoding: ~2x faster, slightly lower quality
+  --beams <n>           Beam width for decoding (default: 4, or 1 with --fast)
+  --batch-size <n>      Strings translated per model batch (default: 32)
   --report <file>       Write a JSON report of strings that need review
   --fuzzy               For .po/.pot: flag every entry this run (re)translated as "#, fuzzy"
   --config <file>       Project config (default: ./${CONFIG_FILE} if present)

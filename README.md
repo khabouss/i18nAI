@@ -49,7 +49,7 @@ Download 577 MB? (Y/n)
 ## Commands
 
 ```bash
-locale-ai translate --to fr,pt-BR [--from en] [--input dir] [--dry-run] [--overwrite] [--fast] [--report file] [-y]
+locale-ai translate --to fr,pt-BR [--from en] [--input dir] [--dry-run] [--overwrite] [--fast] [--beams n] [--batch-size n] [--report file] [-y]
 locale-ai check [--from en] [--input dir]   # CI: fails if a translated locale has missing keys or placeholder mismatches
                                              # (also warns, without failing, about strings left identical to the source)
 locale-ai models list [--from en]     # supported language pairs
@@ -59,7 +59,7 @@ locale-ai models remove en-de
 locale-ai models convert <hf-marian-model> --out <dir>   # bring your own model (see below)
 ```
 
-`translate` uses beam search (4 beams) by default. `--fast` uses greedy decoding: 2–3x faster, about 0.5 chrF lower.
+`translate` uses beam search (4 beams) by default; `--beams n` overrides the width directly. `--fast` uses greedy decoding (equivalent to `--beams 1`): 2–3x faster, about 0.5 chrF lower. `--batch-size n` (default 32) controls how many strings go through the model per batch — lower it if you're hitting memory limits, raise it for a bit more throughput on a machine with room to spare.
 
 Models are cached once per machine in `~/.cache/locale-ai` (`LOCALE_AI_CACHE` to change). In CI, pass `--yes`.
 

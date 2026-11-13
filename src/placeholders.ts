@@ -28,7 +28,7 @@ const SOURCES = [
   /\$\{[^{}]*\}/.source, // ${name}
   /%\{[^{}]+\}/.source, // %{name}  ruby / polyglot
   /%\([\w.]+\)[sdifr]/.source, // %(name)s  python
-  /%(?:\d+\$)?[-+0#]*\d*(?:\.\d+)?[sdifuxXeEgGcpo@]/.source, // %s %d %1$s %.2f %@
+  /%(?:\d+\$)?[-+0#]*\d*(?:\.\d+)?[sdifuxXeEgGcpo@](?![A-Za-z])/.source, // %s %d %1$s %.2f %@ (not "100%off")
   /@(?:\.\w+)?:\(?[\w.-]+\)?/.source, // @:key @.lower:key  vue-i18n linked messages
   /\{\s*[\w.-]+\s*(?:,[^{}]*)?\}/.source, // {name} {0} {count, number}  ICU simple args
   /<\/?[A-Za-z][\w.:-]*(?:\s[^<>]*)?\/?>/.source, // <b> </b> <a href="..."> <Trans/>
@@ -37,7 +37,7 @@ const SOURCES = [
   /https?:\/\/[^\s<>"']*[^\s<>"'.,;:!?)\]]/.source, // URLs
   /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/.source, // e-mail addresses
   /(?<=^|[\s(])(?::[a-zA-Z_]\w*)/.source, // :attribute  laravel
-  /\$[A-Za-z_]\w*/.source, // $name
+  /\$(?![A-Z]{2,}(?![a-zA-Z0-9_]))[A-Za-z_]\w*/.source, // $name (not "$USD", "$CAD" — currency codes)
 ];
 
 const PLACEHOLDER_SRC = SOURCES.map((s) => `(?:${s})`).join("|");

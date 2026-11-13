@@ -33,7 +33,9 @@ test("mask protects common placeholder syntaxes", () => {
     ["Hello {name}!", ["{name}"]],
     ["Hi {{user.name}}, {{count}} new", ["{{user.name}}", "{{count}}"]],
     ["%s of %d, %1$s, %.2f, %@", ["%s", "%d", "%1$s", "%.2f", "%@"]],
+    ["range %d-%d", ["%d", "%d"]],
     ["Value: %(amount)s and %{total}", ["%(amount)s", "%{total}"]],
+    ["contact $admin or $user_name for help", ["$admin", "$user_name"]],
     ["Click <a href=\"https://x.io/a\">here</a>", ['<a href="https://x.io/a">', "</a>"]],
     ["Press <0>Save</0> then <1/>", ["<0>", "</0>", "<1/>"]],
     ["See $t(common.terms) and @:app.name", ["$t(common.terms)", "@:app.name"]],
@@ -47,7 +49,16 @@ test("mask protects common placeholder syntaxes", () => {
 });
 
 test("mask leaves ordinary text alone", () => {
-  for (const s of ["100% sure", "Note: read this", "Price $5", "a < b > c", "Hello world."]) {
+  for (const s of [
+    "100% sure",
+    "Note: read this",
+    "Price $5",
+    "a < b > c",
+    "Hello world.",
+    "Get 100%off today", // "%o" is not a stray printf spec glued onto "ff"
+    "Price in $USD", // a currency code, not a "$name" placeholder
+    "pay in $CAD or $USD",
+  ]) {
     assert.deepEqual(mask(s).tokens, [], s);
   }
 });
