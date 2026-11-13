@@ -28,7 +28,7 @@ export interface EngineOptions {
   onProgress?: (done: number, total: number) => void;
 }
 
-export type IssueKind = "placeholder-fallback" | "suspicious-length" | "repetition" | "edited";
+export type IssueKind = "placeholder-fallback" | "suspicious-length" | "repetition" | "edited" | "conflict";
 
 export interface Issue {
   source: string;

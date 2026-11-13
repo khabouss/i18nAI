@@ -17,7 +17,7 @@ import {
 import { translateStrings, type Issue } from "./engine.ts";
 import { CONFIG_FILE, glossaryLookup, loadConfig, protectRegex, type ProjectConfig } from "./glossary.ts";
 import { intlCode, parseLocale, type Locale } from "./lang.ts";
-import { editedPaths, isSourceStale, LOCK_FILENAME, loadLock, recordEntries, saveLock } from "./lock.ts";
+import { editedPaths, isEdited, isSourceStale, LOCK_FILENAME, loadLock, pruneDeletedKeys, recordEntries, saveLock, type LockFile } from "./lock.ts";
 import {
   addNestedPluralForms,
   addPluralForms,
@@ -31,6 +31,7 @@ import {
   readLocaleDoc,
   sourceFiles,
   targetFile,
+  translatedPaths,
   usesI18nextPlurals,
   type LocaleDoc,
 } from "./locales.ts";
@@ -57,10 +58,11 @@ const HELP = `locale-ai ${VERSION} — translate i18n locale files locally, on C
 
 Usage:
   locale-ai translate --to <locales> [options]
-  locale-ai check [--from <locale>]
+  locale-ai check [--from <locale>] [--input <dir>] [--config <file>]
                         Validate that already-translated locales have the same keys and
-                        placeholders as the source, without translating. Exits non-zero
-                        on a mismatch (CI-friendly).
+                        placeholders as the source, and (via locale-ai.lock.json, if present)
+                        that none has gone stale since it was last translated, without
+                        translating anything. Exits non-zero on a mismatch (CI-friendly).
   locale-ai models list [--from <locale>]
   locale-ai models installed
   locale-ai models install <from-to | model-id> [--yes]
@@ -100,8 +102,30 @@ const endStatus = () => {
 
 const mb = (bytes: number) => `${Math.round(bytes / 1e6)} MB`;
 const rel = (p: string) => path.relative(process.cwd(), p) || ".";
-/** Portable lock-file key: forward slashes regardless of platform. */
-const fileKey = (p: string) => rel(p).split(path.sep).join("/");
+/**
+ * Portable lock-file key: forward slashes, relative to `base` (the lock
+ * file's own directory) rather than the current working directory — so the
+ * same source file gets the same key whether this ran from the repo root or
+ * from a subdirectory with a relative `--input`.
+ */
+const fileKey = (p: string, base: string) => path.relative(base, p).split(path.sep).join("/");
+
+/**
+ * True when `path`'s source has changed for `targetTag` since it was last
+ * translated (see lock.ts's `isSourceStale`) AND the existing target text at
+ * that path wasn't itself hand-edited since this tool last wrote it. An edit
+ * always wins over staleness — a source change alone is never allowed to
+ * silently clobber a translator's edit; `--overwrite` is the only way past
+ * both at once.
+ */
+function staleNotEdited(lock: LockFile, lockKey: string, existing: unknown, targetTag: string): (p: string, s: string) => boolean {
+  const existingFlat = new Map(flattenStrings(existing).map((e) => [e.path, e.value]));
+  return (p, s) => {
+    if (!isSourceStale(lock, lockKey, p, targetTag, s)) return false;
+    const current = existingFlat.get(p);
+    return current === undefined || !isEdited(lock, lockKey, p, targetTag, current);
+  };
+}
 
 /**
  * `Number("abc")` is NaN, and NaN silently poisons everything downstream (an
@@ -222,7 +246,9 @@ async function cmdTranslate(argv: string[]): Promise<number> {
   const protect = protectRegex(config);
   const isProtectedKey = keyPathProtect(config.doNotTranslateKeys);
   const layout = detectLayout(process.cwd(), from.tag, values.input);
-  const lockPath = path.resolve(process.cwd(), LOCK_FILENAME);
+  const lockDir = config.configFile ? path.dirname(config.configFile) : layout.root;
+  const lockPath = path.resolve(lockDir, LOCK_FILENAME);
+  const lockExisted = fs.existsSync(lockPath);
   const lock = loadLock(lockPath);
   const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag, true, values.fuzzy!) }));
   const singularHints = new Set(sources.flatMap(({ doc }) => [...pluralOneStrings(doc.data)]));
@@ -248,7 +274,7 @@ async function cmdTranslate(argv: string[]): Promise<number> {
     const files = sources.map(({ file, doc }): FileJob => {
       const target = targetFile(layout, from.tag, locale.tag, file);
       const existing = fs.existsSync(target) ? readLocaleDoc(target, locale.tag).data : undefined;
-      const isStale = (p: string, s: string) => isSourceStale(lock, fileKey(file), p, s);
+      const isStale = staleNotEdited(lock, fileKey(file, lockDir), existing, locale.tag);
       return {
         source: file,
         target,
@@ -321,11 +347,15 @@ async function cmdTranslate(argv: string[]): Promise<number> {
     let written = 0;
     let pluralsAdded = 0;
     for (const f of job.files) {
-      const lockKey = fileKey(f.source);
-      const isStale = (p: string, s: string) => isSourceStale(lock, lockKey, p, s);
+      const lockKey = fileKey(f.source, lockDir);
+      const srcFlat = flattenStrings(f.doc.data);
+      const isStale = staleNotEdited(lock, lockKey, f.existing, job.locale.tag);
       if (f.existing !== undefined) {
+        const srcByPath = new Map(srcFlat.map((e) => [e.path, e.value]));
         for (const editedPath of editedPaths(lock, lockKey, job.locale.tag, flattenStrings(f.existing))) {
-          allIssues.push({ source: editedPath, kind: "edited", locale: job.locale.tag });
+          const srcVal = srcByPath.get(editedPath);
+          const alsoStale = srcVal !== undefined && isSourceStale(lock, lockKey, editedPath, job.locale.tag, srcVal);
+          allIssues.push({ source: editedPath, kind: alsoStale ? "conflict" : "edited", locale: job.locale.tag });
         }
       }
       const built = buildTarget(f.doc.data, f.existing, (s) => translations.get(s) ?? s, values.overwrite!, isProtectedKey, isStale);
@@ -341,12 +371,14 @@ async function cmdTranslate(argv: string[]): Promise<number> {
         written++;
       }
       const outFlat = new Map(flattenStrings(plural.doc).map((e) => [e.path, e.value]));
+      const translatedSet = new Set(translatedPaths(f.doc.data, f.existing, values.overwrite!, isProtectedKey, isStale));
       recordEntries(
         lock,
         lockKey,
         job.locale.tag,
-        flattenStrings(f.doc.data).map(({ path: p, value }) => ({ path: p, source: value, written: outFlat.get(p) ?? "" })),
+        srcFlat.filter(({ path: p }) => translatedSet.has(p)).map(({ path: p, value }) => ({ path: p, source: value, written: outFlat.get(p) ?? "" })),
       );
+      pruneDeletedKeys(lock, lockKey, srcFlat.map((e) => e.path));
     }
     const secs = ((Date.now() - started) / 1000).toFixed(1);
     const issues = allIssues.filter((i) => i.locale === job.locale.tag).length;
@@ -358,7 +390,10 @@ async function cmdTranslate(argv: string[]): Promise<number> {
     );
   }
   for (const t of loaded.values()) await t.dispose();
-  if (jobs.length) saveLock(lockPath, lock);
+  if (jobs.length) {
+    saveLock(lockPath, lock);
+    if (!lockExisted) log(`\nCreated ${rel(lockPath)} — commit it so other runs (and \`locale-ai check\`) see the same history.`);
+  }
 
   if (allIssues.length) {
     log();
@@ -488,10 +523,14 @@ async function cmdCheck(argv: string[]): Promise<number> {
     options: {
       from: { type: "string", default: "en" },
       input: { type: "string" },
+      config: { type: "string" },
     },
   });
   const from = parseLocale(values.from!);
+  const config = loadConfig(process.cwd(), values.config);
   const layout = detectLayout(process.cwd(), from.tag, values.input);
+  const lockDir = config.configFile ? path.dirname(config.configFile) : layout.root;
+  const lock = loadLock(path.resolve(lockDir, LOCK_FILENAME));
   const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag, true) }));
   const targets = existingTargets(layout, from.tag);
   if (!targets.length) {
@@ -505,8 +544,10 @@ async function cmdCheck(argv: string[]): Promise<number> {
     let missing = 0;
     let mismatched = 0;
     let identical = 0;
+    let stale = 0;
     for (const { file, doc } of sources) {
       const target = targetFile(layout, from.tag, to, file);
+      const lockKey = fileKey(file, lockDir);
       if (!fs.existsSync(target)) {
         missing += flattenStrings(doc.data).length;
         log(`✗ ${to}: ${rel(target)} is missing entirely`);
@@ -528,6 +569,11 @@ async function cmdCheck(argv: string[]): Promise<number> {
           log(`✗ ${to}: ${rel(target)} "${p}" placeholders differ: source [${srcMasked.tokens.toSorted().join(", ")}], target [${tgtTokens.join(", ")}]`);
           continue;
         }
+        if (isSourceStale(lock, lockKey, p, to, srcVal)) {
+          stale++;
+          log(`✗ ${to}: ${rel(target)} "${p}" is stale — the ${from.tag} source changed since this was last translated`);
+          continue;
+        }
         if (tgtVal === srcVal && hasTranslatableText(srcMasked.text)) {
           identical++;
           log(`⚠ ${to}: ${rel(target)} "${p}" is untouched, identical to the ${from.tag} source`);
@@ -535,7 +581,7 @@ async function cmdCheck(argv: string[]): Promise<number> {
       }
     }
     identicalTotal += identical;
-    if (missing || mismatched) problems++;
+    if (missing || mismatched || stale) problems++;
     else log(`✓ ${to}${identical ? ` (${identical} left identical to ${from.tag})` : ""}`);
   }
   if (identicalTotal) log(`\n${identicalTotal} string${identicalTotal === 1 ? "" : "s"} left identical to the source — not a failure, but worth a look.`);

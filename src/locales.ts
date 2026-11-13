@@ -1593,6 +1593,36 @@ export function pendingStrings(
 }
 
 /**
+ * Key paths `buildTarget` will call `translate` for, given the same inputs —
+ * i.e. the paths actually (re)translated this run, as opposed to every path
+ * in the source. Used to limit lock-file updates to those paths, so a path
+ * left untouched (already translated, not stale) never has its recorded
+ * "last written" hash overwritten with text buildTarget didn't itself write —
+ * which is what let a translator's hand edit be silently adopted as this
+ * tool's own baseline on a prior run.
+ */
+export function translatedPaths(
+  source: unknown,
+  existing: unknown,
+  overwrite: boolean,
+  isProtected?: (path: string) => boolean,
+  isStale?: (path: string, source: string) => boolean,
+): string[] {
+  const out: string[] = [];
+  const visit = (s: unknown, e: unknown, path: string): void => {
+    if (typeof s === "string") {
+      if (!isProtected?.(path) && (needsTranslation(e, overwrite) || !!isStale?.(path, s))) out.push(path);
+    } else if (Array.isArray(s)) {
+      s.forEach((v, i) => visit(v, Array.isArray(e) ? e[i] : undefined, `${path}[${i}]`));
+    } else if (isObj(s)) {
+      for (const k of Object.keys(s)) visit(s[k], isObj(e) ? e[k] : undefined, path ? `${path}.${k}` : k);
+    }
+  };
+  visit(source, existing, "");
+  return out;
+}
+
+/**
  * Builds the target document: source structure and key order, existing
  * translations kept (unless overwrite or stale), new strings from `translate`,
  * and keys that only exist in the target preserved at the end. A string at a

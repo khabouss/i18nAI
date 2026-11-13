@@ -8,7 +8,7 @@ import { translateStrings } from "../src/engine.ts";
 import { extractIcu } from "../src/icu.ts";
 import { extractPipePlural } from "../src/vue-plural.ts";
 import { parseLocale } from "../src/lang.ts";
-import { editedPaths, hashOf, isSourceStale, loadLock, recordEntries, saveLock } from "../src/lock.ts";
+import { editedPaths, hashOf, isEdited, isSourceStale, loadLock, pruneDeletedKeys, recordEntries, saveLock } from "../src/lock.ts";
 import {
   addNestedPluralForms,
   addPluralForms,
@@ -207,32 +207,62 @@ test("pendingStrings/buildTarget: isStale forces re-translation of a non-empty t
   assert.equal(JSON.stringify(built), JSON.stringify({ a: "[Hello]", b: "Monde" }));
 });
 
-test("lock: a source edit is detected as stale; a translator edit is flagged, not stale", () => {
+test("lock: a source edit is detected as stale; a translator edit is flagged, not stale; per-locale, not shared", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-lock-"));
   const file = path.join(dir, "locale-ai.lock.json");
-  assert.deepEqual(loadLock(file), { version: 1, files: {} });
+  assert.deepEqual(loadLock(file), { version: 2, files: {} });
 
   const lock = loadLock(file);
   recordEntries(lock, "en.json", "fr", [{ path: "welcome", source: "Welcome back!", written: "Bon retour !" }]);
-  assert.equal(isSourceStale(lock, "en.json", "welcome", "Welcome back!"), false);
+  assert.equal(isSourceStale(lock, "en.json", "welcome", "fr", "Welcome back!"), false);
   assert.deepEqual(editedPaths(lock, "en.json", "fr", [{ path: "welcome", value: "Bon retour !" }]), []);
 
+  // Translating "fr" never marks "es" (never translated) as up to date for the same path.
+  assert.equal(isSourceStale(lock, "en.json", "welcome", "es", "Welcome back!"), false);
+  assert.equal(isEdited(lock, "en.json", "welcome", "es", "anything"), false);
+
   // The English source changed: stale regardless of what the target currently holds.
-  assert.equal(isSourceStale(lock, "en.json", "welcome", "Welcome back, friend!"), true);
+  assert.equal(isSourceStale(lock, "en.json", "welcome", "fr", "Welcome back, friend!"), true);
 
   // The target was hand-edited while the source stayed the same: flagged, not "stale".
   assert.deepEqual(editedPaths(lock, "en.json", "fr", [{ path: "welcome", value: "Re-bonjour !" }]), ["welcome"]);
-  assert.equal(isSourceStale(lock, "en.json", "welcome", "Welcome back!"), false);
+  assert.equal(isSourceStale(lock, "en.json", "welcome", "fr", "Welcome back!"), false);
 
   // A path the lock has never recorded (new key, or adopting the lockfile on an
   // existing project) is never reported as stale or edited.
-  assert.equal(isSourceStale(lock, "en.json", "brandNew", "Something new"), false);
+  assert.equal(isSourceStale(lock, "en.json", "brandNew", "fr", "Something new"), false);
   assert.deepEqual(editedPaths(lock, "en.json", "fr", [{ path: "brandNew", value: "Nouveau" }]), []);
+
+  // recordEntries only touches the locale it's given — "es" is still untouched after translating "fr" twice.
+  recordEntries(lock, "en.json", "fr", [{ path: "welcome", source: "Welcome back, friend!", written: "Re-bonjour, mon ami !" }]);
+  assert.equal(isSourceStale(lock, "en.json", "welcome", "es", "Welcome back, friend!"), false);
+  assert.equal(isEdited(lock, "en.json", "welcome", "es", "anything"), false);
+
+  // Deleted keys are pruned for every locale, not just the one being translated.
+  recordEntries(lock, "en.json", "es", [{ path: "welcome", source: "Welcome back, friend!", written: "Bienvenido de nuevo, amigo!" }]);
+  pruneDeletedKeys(lock, "en.json", ["somethingElse"]);
+  assert.equal(isSourceStale(lock, "en.json", "welcome", "fr", "anything"), false);
+  assert.equal(isEdited(lock, "en.json", "welcome", "es", "anything"), false);
 
   saveLock(file, lock);
   assert.deepEqual(loadLock(file), lock);
   assert.equal(hashOf("x"), hashOf("x"));
   assert.notEqual(hashOf("x"), hashOf("y"));
+});
+
+test("lock: a pre-0.7.0 (version 1) lock file is migrated in memory, never crashes a run", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-lock-v1-"));
+  const file = path.join(dir, "locale-ai.lock.json");
+  const v1 = {
+    version: 1,
+    files: { "en.json": { welcome: { source: hashOf("Welcome back!"), mt: { fr: hashOf("Bon retour !") } } } },
+  };
+  fs.writeFileSync(file, JSON.stringify(v1));
+  const lock = loadLock(file);
+  assert.equal(lock.version, 2);
+  assert.equal(isSourceStale(lock, "en.json", "welcome", "fr", "Welcome back!"), false);
+  assert.equal(isEdited(lock, "en.json", "welcome", "fr", "Bon retour !"), false);
+  assert.equal(isEdited(lock, "en.json", "welcome", "fr", "Something else entirely"), true);
 });
 
 test("addPluralForms adds the forms the target language needs", () => {

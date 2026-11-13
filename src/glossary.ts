@@ -92,6 +92,8 @@ export interface ProjectConfig {
   models?: CustomModelConfig[];
   /** Folder of the config file (set by loadConfig; relative model paths resolve from here). */
   dir?: string;
+  /** Absolute path of the config file actually found and read, if any (set by loadConfig; absent when none exists). */
+  configFile?: string;
 }
 
 export const CONFIG_FILE = "locale-ai.config.json";
@@ -107,7 +109,7 @@ export function loadConfig(cwd: string, file?: string): ProjectConfig {
     if (cfg.doNotTranslate && !Array.isArray(cfg.doNotTranslate)) throw new Error('"doNotTranslate" must be an array');
     if (cfg.doNotTranslateKeys && !Array.isArray(cfg.doNotTranslateKeys)) throw new Error('"doNotTranslateKeys" must be an array');
     if (cfg.models && !Array.isArray(cfg.models)) throw new Error('"models" must be an array');
-    return { ...cfg, dir: path.dirname(p) };
+    return { ...cfg, dir: path.dirname(p), configFile: p };
   } catch (e) {
     throw new Error(`Invalid ${path.basename(p)}: ${(e as Error).message}`);
   }
