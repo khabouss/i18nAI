@@ -140,7 +140,7 @@ Measured on a sample app (see `test/fixtures`):
 
 ## How it works
 
-- **Models**: [OPUS-MT](https://huggingface.co/Helsinki-NLP) (MarianMT) in ONNX, int8-quantized (int8 vs fp32 measured equal: en-fr chrF 68.9 vs 69.0, en-ar 47.8 vs 47.8). Downloads are pinned to a commit and verified (sha256 / git blob hash).
+- **Models**: [OPUS-MT](https://huggingface.co/Helsinki-NLP) (MarianMT) in ONNX, int8-quantized (int8 vs fp32 measured equal: en-fr chrF 68.9 vs 69.0, en-ar 47.8 vs 47.8). Downloads are pinned to a commit and verified (sha256 / git blob hash). Every model is OPUS-MT by Helsinki-NLP (Tiedemann & Thottingal, 2020 — cite this if you use the models); each is licensed individually (most CC-BY 4.0, some Apache 2.0 — check the model's own card). The larger `tc-big` and multi-target checkpoints are re-hosted as ONNX conversions under [khabouss/*](https://huggingface.co/khabouss), each model card carrying the original's license, crediting and citing it, and listing only the ONNX conversion and quantization as locale-ai's own addition.
 - **Own runtime** on [onnxruntime](https://onnxruntime.ai) (`src/marian.ts`), no transformers.js:
   - a SentencePiece Unigram tokenizer including the model's precompiled normalisation map, identical to Python `sentencepiece` on 3,577/3,577 test sentences across 5 models (`src/spm.ts`);
   - real beam search with Hugging Face semantics, identical to `transformers` PyTorch beam search on 599/600 sentences; log-softmax + top-k run natively in a tiny embedded ONNX graph (`scripts/make-topk-graph.py`);
