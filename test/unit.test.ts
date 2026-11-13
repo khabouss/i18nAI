@@ -897,6 +897,74 @@ test("XLIFF 1.2: inline <x>/<g> markup survives translation like any other prote
   assert.match(out, /target-language="fr"/);
 });
 
+test("JS/TS locale modules: export default/module.exports, comments, nesting, arrays, quote/indent style kept; unsupported syntax fails clearly", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-js-"));
+
+  const file = path.join(root, "en.ts");
+  fs.writeFileSync(
+    file,
+    `// Top-level comment, not attached to anything.
+export default {
+  // Shown on the home page
+  greeting: 'Hello, world!',
+  nested: {
+    cancel: 'Cancel',
+  },
+  colors: ['red', 'green'],
+  count: 3,
+};
+`,
+  );
+  const doc = readLocaleDoc(file, "en", true);
+  assert.equal(
+    JSON.stringify(doc.data),
+    JSON.stringify({ greeting: "Hello, world!", nested: { cancel: "Cancel" }, colors: ["red", "green"], count: 3 }),
+  );
+  const out = doc.serialize({
+    greeting: "Bonjour, monde !",
+    nested: { cancel: "Annuler" },
+    colors: ["rouge", "vert"],
+    count: 3,
+  });
+  assert.equal(
+    out,
+    `// Top-level comment, not attached to anything.
+export default {
+  // Shown on the home page
+  greeting: 'Bonjour, monde !',
+  nested: {
+    cancel: 'Annuler',
+  },
+  colors: [
+    'rouge',
+    'vert',
+  ],
+  count: 3,
+};
+`,
+  );
+
+  // CommonJS, and a TS trailing "as const" annotation, both just work.
+  const cjs = path.join(root, "cjs.js");
+  fs.writeFileSync(cjs, 'module.exports = {\n  greeting: "Hi",\n};\n');
+  assert.equal(JSON.stringify(readLocaleDoc(cjs, "en", true).data), '{"greeting":"Hi"}');
+
+  const asConst = path.join(root, "asconst.ts");
+  fs.writeFileSync(asConst, 'export default {\n  greeting: "Hi",\n} as const;\n');
+  const asConstDoc = readLocaleDoc(asConst, "en", true);
+  assert.equal(JSON.stringify(asConstDoc.data), '{"greeting":"Hi"}');
+  assert.equal(asConstDoc.serialize({ greeting: "Salut" }), 'export default {\n  greeting: "Salut",\n} as const;\n');
+
+  // A function value, and a separately-declared-then-exported constant, both fail with a clear error rather than silently misparsing.
+  const fn = path.join(root, "fn.js");
+  fs.writeFileSync(fn, 'export default {\n  plural: (n) => (n === 1 ? "item" : "items"),\n};\n');
+  assert.throws(() => readLocaleDoc(fn, "en", true), /Unsupported JS syntax/);
+
+  const indirect = path.join(root, "indirect.ts");
+  fs.writeFileSync(indirect, 'const en = {\n  greeting: "Hi",\n};\nexport default en;\n');
+  assert.throws(() => readLocaleDoc(indirect, "en", true), /must be a plain object literal/);
+});
+
 test(".NET .resx: detection (untagged default, dot-separated culture target), resheaders/comments kept, binary resources never touched", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-resx-"));
   const file = path.join(root, "Resources.resx");
