@@ -256,6 +256,19 @@ test("lock: a source edit is detected as stale; a translator edit is flagged, no
   assert.notEqual(hashOf("x"), hashOf("y"));
 });
 
+test("lock: an unparseable (e.g. merge-conflicted) lock file throws instead of being silently discarded", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-lock-conflict-"));
+  const file = path.join(dir, "locale-ai.lock.json");
+  fs.writeFileSync(
+    file,
+    '{\n  "version": 3,\n  "entries": {\n<<<<<<< HEAD\n    "a": {}\n=======\n    "b": {}\n>>>>>>> branch\n  }\n}\n',
+  );
+  assert.throws(() => loadLock(file), /valid JSON|merge conflict/);
+
+  // A file that simply doesn't exist yet still starts fresh silently (first run).
+  assert.deepEqual(loadLock(path.join(dir, "missing.lock.json")), { version: 3, entries: {} });
+});
+
 test("lock: a pre-0.7.0 (version 1) lock file is migrated in memory, never crashes a run", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-lock-v1-"));
   const file = path.join(dir, "locale-ai.lock.json");
@@ -287,6 +300,159 @@ test("addPluralForms adds the forms the target language needs", () => {
   const again = addPluralForms(ar.doc, "ar");
   assert.equal(again.added, 0);
   assert.equal(JSON.stringify(again.doc), JSON.stringify(ar.doc));
+});
+
+test("addPluralForms: a derived category resyncs when \"other\" was just retranslated, unless it was hand-edited", () => {
+  const doc = {
+    item_one: "1 item",
+    item_other: "N items NEW",
+    item_few: "N items OLD-FEW",
+    item_many: "N items OLD-MANY",
+  };
+  // Both "one" and "other" have a real, independent English source counterpart (the only
+  // two categories English ever needs) — never resynced/edit-tracked by this function.
+  const hasSource = (p: string) => p === "item_one" || p === "item_other";
+
+  // "other" untouched this run: every existing category is left exactly as it was —
+  // same as calling with no opts at all (the pre-fix behavior for an unchanged "other").
+  const untouched = addPluralForms(doc, "ar", { otherStale: () => false, isEdited: () => false, hasSource });
+  assert.equal((untouched.doc as Record<string, string>).item_few, "N items OLD-FEW");
+  assert.equal((untouched.doc as Record<string, string>).item_many, "N items OLD-MANY");
+  assert.deepEqual(untouched.edited, []);
+
+  // "other" was just retranslated: both existing derived categories resync to the new
+  // text, and the newly-added zero/two categories are derived from it too — but "one"
+  // (a real source key) is left completely alone despite also existing in the group.
+  const refreshed = addPluralForms(doc, "ar", { otherStale: (p) => p === "item_other", isEdited: () => false, hasSource });
+  const rdoc = refreshed.doc as Record<string, string>;
+  assert.equal(rdoc.item_one, "1 item");
+  assert.equal(rdoc.item_few, "N items NEW");
+  assert.equal(rdoc.item_many, "N items NEW");
+  assert.equal(rdoc.item_zero, "N items NEW");
+  assert.equal(rdoc.item_two, "N items NEW");
+  assert.equal(refreshed.added, 2, "only the brand-new zero/two categories count as \"added\"");
+  assert.deepEqual(
+    new Set(refreshed.derived.map((d) => d.path)),
+    new Set(["item_few", "item_many", "item_zero", "item_two"]),
+  );
+  assert.deepEqual(refreshed.edited, []);
+
+  // A translator hand-edited "item_few"; "other" also changed this run — that's a
+  // conflict (both happened), and the hand-edited text must never be overwritten.
+  // "item_many" wasn't touched by anyone, so it still resyncs normally.
+  const conflict = addPluralForms(doc, "ar", {
+    otherStale: (p) => p === "item_other",
+    isEdited: (p) => p === "item_few",
+    hasSource,
+  });
+  const cdoc = conflict.doc as Record<string, string>;
+  assert.equal(cdoc.item_few, "N items OLD-FEW", "the hand edit survives untouched");
+  assert.equal(cdoc.item_many, "N items NEW");
+  assert.deepEqual(conflict.edited, [{ path: "item_few", conflict: true }]);
+  assert.ok(!conflict.derived.some((d) => d.path === "item_few"));
+
+  // A hand edit with "other" NOT retranslated this run is still reported — "edited" is
+  // tracked independently of staleness, the same as every other key in the lock.
+  const editedOnly = addPluralForms(doc, "ar", { otherStale: () => false, isEdited: (p) => p === "item_few", hasSource });
+  assert.deepEqual(editedOnly.edited, [{ path: "item_few", conflict: false }]);
+});
+
+test("addNestedPluralForms: a derived category resyncs when \"other\" was just retranslated, unless it was hand-edited", () => {
+  const { pluralCategories } = new Intl.PluralRules("ar").resolvedOptions();
+  const needsFew = pluralCategories.includes("few");
+  assert.ok(needsFew, "test assumes ar needs a few category — sanity check the assumption itself");
+  const hasSource = (p: string) => p === "item.one" || p === "item.other";
+
+  const doc = { item: { one: "1 item", other: "N items NEW", few: "N items OLD-FEW" } };
+  const refreshed = addNestedPluralForms(doc, "ar", { otherStale: (p) => p === "item.other", isEdited: () => false, hasSource });
+  const rdoc = (refreshed.doc as { item: Record<string, string> }).item;
+  assert.equal(rdoc.one, "1 item");
+  assert.equal(rdoc.few, "N items NEW");
+  assert.ok(refreshed.derived.some((d) => d.path === "item.few"));
+
+  const conflict = addNestedPluralForms(doc, "ar", {
+    otherStale: (p) => p === "item.other",
+    isEdited: (p) => p === "item.few",
+    hasSource,
+  });
+  const cdoc = (conflict.doc as { item: Record<string, string> }).item;
+  assert.equal(cdoc.few, "N items OLD-FEW");
+  assert.deepEqual(conflict.edited, [{ path: "item.few", conflict: true }]);
+});
+
+test("plural-sync + lock wiring: a hand-edited derived path survives pruneDeletedKeys across runs (regression)", () => {
+  // Reproduces, at the unit level, the exact sequence found via real e2e testing: cmdTranslate's
+  // pruneDeletedKeys call must keep BOTH pluralDerived and pluralEdited paths, or an edited-but-
+  // protected derived key's lock entry is deleted the run it isn't refreshed, and the NEXT run's
+  // isEdited(...) sees no history (= "not edited") and silently overwrites the hand edit.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-prune-"));
+  const lock = loadLock(path.join(dir, "x.lock.json"));
+  const fileKey = "en.json";
+  const tag = "ar";
+  const hasSource = (p: string) => p === "item_one" || p === "item_other";
+
+  // Run 1: fresh translation. "other" is new, so few/many are derived from it.
+  const r1 = addPluralForms({ item_one: "1 item", item_other: "A" }, "ar", {
+    otherStale: () => true,
+    isEdited: () => false,
+    hasSource,
+  });
+  recordEntries(lock, fileKey, tag, [
+    { path: "item_one", source: "1 item", written: "1 item" },
+    { path: "item_other", source: "A", written: "A" },
+  ]);
+  recordEntries(
+    lock,
+    fileKey,
+    tag,
+    r1.derived.map((d) => ({ path: d.path, source: d.value, written: d.value })),
+  );
+  pruneDeletedKeys(lock, fileKey, ["item_one", "item_other", ...r1.derived.map((d) => d.path)]);
+  assert.ok(lock.entries[`${fileKey}#item_few`], "derived entry recorded after run 1");
+
+  // Hand-edit item_few, then run 2: "other" is retranslated (now stale/refreshed).
+  const built2 = { ...(r1.doc as Record<string, string>), item_few: "HAND EDITED" };
+  const r2 = addPluralForms(built2, "ar", {
+    otherStale: (p) => p === "item_other",
+    isEdited: (p, v) => isEdited(lock, fileKey, p, tag, v),
+    hasSource,
+  });
+  assert.equal((r2.doc as Record<string, string>).item_few, "HAND EDITED", "conflict preserves the hand edit this run");
+  assert.deepEqual(r2.edited, [{ path: "item_few", conflict: true }]);
+
+  recordEntries(lock, fileKey, tag, [
+    { path: "item_one", source: "1 item", written: "1 item" },
+    { path: "item_other", source: "B", written: "B" },
+  ]);
+  recordEntries(
+    lock,
+    fileKey,
+    tag,
+    r2.derived.map((d) => ({ path: d.path, source: d.value, written: d.value })),
+  );
+  // This is the exact fix under test: the keep-set must include pluralEdited paths too,
+  // not just srcFlat + pluralDerived, or item_few's lock entry is deleted right here.
+  pruneDeletedKeys(lock, fileKey, [
+    "item_one",
+    "item_other",
+    ...r2.derived.map((d) => d.path),
+    ...r2.edited.map((e) => e.path),
+  ]);
+  assert.ok(lock.entries[`${fileKey}#item_few`], "edited entry must survive pruning or run 3 will see no history");
+
+  // Run 3: "other" is retranslated again with no change to item_few. Must still be protected.
+  const built3 = { ...(r2.doc as Record<string, string>) };
+  const r3 = addPluralForms(built3, "ar", {
+    otherStale: (p) => p === "item_other",
+    isEdited: (p, v) => isEdited(lock, fileKey, p, tag, v),
+    hasSource,
+  });
+  assert.equal(
+    (r3.doc as Record<string, string>).item_few,
+    "HAND EDITED",
+    "still protected on a 3rd run — this is the regression this test guards against",
+  );
+  assert.deepEqual(r3.edited, [{ path: "item_few", conflict: true }]);
 });
 
 test("usesI18nextPlurals: only flat JSON/YAML, not .po/.arb/.strings", () => {
@@ -1378,6 +1544,33 @@ test("glossary: built-in UI terms, project overrides, casing and punctuation", a
   const re = protectRegex({ doNotTranslate: ["Acme", "Acme Pro"] })!;
   assert.deepEqual(mask("Upgrade to Acme Pro today", "natural", re).tokens, ["Acme Pro"]);
   assert.deepEqual(mask("Acmeville is not Acme", "natural", re).tokens, ["Acme"]);
+});
+
+test("loadConfig: walks up to find locale-ai.config.json like eslint/prettier, but stops at .git", async () => {
+  const { loadConfig } = await import("../src/glossary.ts");
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-cfg-"));
+  fs.writeFileSync(path.join(root, "locale-ai.config.json"), JSON.stringify({ doNotTranslate: ["Acme"] }));
+  const sub = path.join(root, "a/b/c");
+  fs.mkdirSync(sub, { recursive: true });
+  const found = loadConfig(sub);
+  assert.equal(found.configFile, path.join(root, "locale-ai.config.json"));
+  assert.deepEqual(found.doNotTranslate, ["Acme"]);
+
+  // A config sitting above an unrelated project's own .git root is never picked up.
+  const outer = fs.mkdtempSync(path.join(os.tmpdir(), "lai-cfg-outer-"));
+  fs.writeFileSync(path.join(outer, "locale-ai.config.json"), JSON.stringify({ doNotTranslate: ["ShouldNotBeFound"] }));
+  const inner = path.join(outer, "project");
+  fs.mkdirSync(path.join(inner, ".git"), { recursive: true });
+  const subInner = path.join(inner, "src/locales");
+  fs.mkdirSync(subInner, { recursive: true });
+  assert.deepEqual(loadConfig(subInner), { dir: subInner });
+});
+
+test("loadConfig: --config <file> resolves only against cwd, never walks up, and throws when missing", async () => {
+  const { loadConfig } = await import("../src/glossary.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-cfg-explicit-"));
+  assert.throws(() => loadConfig(dir, "missing.json"), /Config file not found/);
 });
 
 test("engine: count stays before the noun, tag spacing restored", async () => {

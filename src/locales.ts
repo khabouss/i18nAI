@@ -1846,10 +1846,45 @@ export function usesI18nextPlurals(file: string): boolean {
  * back to `_other` for them, so missing forms are added with the `_other` text.
  * Returns the new document and the number of keys added.
  */
-export function addPluralForms(doc: unknown, targetLang: string): { doc: unknown; added: number } {
+/** Passed by the caller so plural-category sync can tell a stale-and-retranslated
+ * "other" apart from an unchanged one, and a hand edit apart from this tool's own
+ * previous output — the same distinctions every other key gets, via the lock. */
+export interface PluralSyncOptions {
+  /** True when this exact path (a group's "other"/wrapper sibling) was (re)translated
+   * this run — its derived zero/two/few/many siblings should resync from the new value
+   * instead of being left as whatever they were before. */
+  otherStale?: (path: string) => boolean;
+  /** True when the current on-disk value at this derived path doesn't match what the
+   * lock last recorded there — a hand edit that must never be silently overwritten. */
+  isEdited?: (path: string, value: string) => boolean;
+  /** True when this exact category path is itself a real source key (always "one" and
+   * "other" for i18next — a language with a 2-category source already translates both
+   * independently; everything else here only ever exists because this function derived
+   * it). Such a category is never resynced or edit-tracked by this pass — it's the normal
+   * translation pipeline's, not this function's, the same as it always was. */
+  hasSource?: (path: string) => boolean;
+}
+
+export interface PluralSyncResult {
+  doc: unknown;
+  /** Count of category keys created because they didn't exist at all before. */
+  added: number;
+  /** Every derived (newly added or just resynced) category path this pass, with the
+   * "other" text it now holds — record a lock entry for each so later runs can tell a
+   * hand edit or a source change apart for these too, the same as any other key. */
+  derived: Array<{ path: string; value: string }>;
+  /** Derived category paths whose current text is a hand edit this pass found but did
+   * not overwrite — `conflict` when the "other" it's derived from also changed this run
+   * (both a source change and a hand edit, same meaning as elsewhere), `edited` otherwise. */
+  edited: Array<{ path: string; conflict: boolean }>;
+}
+
+export function addPluralForms(doc: unknown, targetLang: string, opts: PluralSyncOptions = {}): PluralSyncResult {
   let added = 0;
-  const visit = (v: unknown): unknown => {
-    if (Array.isArray(v)) return v.map(visit);
+  const derived: Array<{ path: string; value: string }> = [];
+  const edited: Array<{ path: string; conflict: boolean }> = [];
+  const visit = (v: unknown, path: string): unknown => {
+    if (Array.isArray(v)) return v.map((x, i) => visit(x, `${path}[${i}]`));
     if (!isObj(v)) return v;
     const keys = Object.keys(v);
     const groups = new Map<string, { cats: Map<string, string>; last: string; ordinal: boolean }>();
@@ -1884,25 +1919,41 @@ export function addPluralForms(doc: unknown, targetLang: string): { doc: unknown
     for (const k of keys) {
       const id = groupOf.get(k);
       if (id === undefined) {
-        out[k] = visit(v[k]);
+        out[k] = visit(v[k], path ? `${path}.${k}` : k);
         continue;
       }
       if (emitted.has(id)) continue;
       emitted.add(id);
       const g = groups.get(id)!;
-      const other = v[g.cats.get("other")!] as string;
+      const otherKey = g.cats.get("other")!;
+      const other = v[otherKey] as string;
+      const otherPath = path ? `${path}.${otherKey}` : otherKey;
+      const refresh = opts.otherStale?.(otherPath) ?? false;
       for (const cat of CATEGORIES) {
         const existing = g.cats.get(cat);
-        if (existing) out[existing] = v[existing];
-        else if (needed.get(id)!.includes(cat)) {
-          out[`${id}_${cat}`] = other;
+        if (existing) {
+          out[existing] = v[existing];
+          const existingPath = path ? `${path}.${existing}` : existing;
+          if (cat === "other" || opts.hasSource?.(existingPath)) continue;
+          const current = v[existing] as string;
+          if (opts.isEdited?.(existingPath, current)) {
+            edited.push({ path: existingPath, conflict: refresh });
+            continue; // never silently overwrite a hand edit, flagged either way
+          }
+          if (!refresh || current === other) continue;
+          out[existing] = other;
+          derived.push({ path: existingPath, value: other });
+        } else if (needed.get(id)!.includes(cat)) {
+          const newKey = `${id}_${cat}`;
+          out[newKey] = other;
           added++;
+          derived.push({ path: path ? `${path}.${newKey}` : newKey, value: other });
         }
       }
     }
     return out;
   };
-  return { doc: visit(doc), added };
+  return { doc: visit(doc, ""), added, derived, edited };
 }
 
 /**
@@ -1914,17 +1965,19 @@ export function addPluralForms(doc: unknown, targetLang: string): { doc: unknown
  * `{ other: "..." }` object is too common as an ordinary translation value (e.g. a
  * key literally named "other") to treat as a plural group on its own.
  */
-export function addNestedPluralForms(doc: unknown, targetLang: string): { doc: unknown; added: number } {
+export function addNestedPluralForms(doc: unknown, targetLang: string, opts: PluralSyncOptions = {}): PluralSyncResult {
   let added = 0;
-  const visit = (v: unknown): unknown => {
-    if (Array.isArray(v)) return v.map(visit);
+  const derived: Array<{ path: string; value: string }> = [];
+  const edited: Array<{ path: string; conflict: boolean }> = [];
+  const visit = (v: unknown, path: string): unknown => {
+    if (Array.isArray(v)) return v.map((x, i) => visit(x, `${path}[${i}]`));
     if (!isObj(v)) return v;
     const keys = Object.keys(v);
     const isGroup =
       keys.length >= 2 && keys.includes("other") && keys.every((k) => CATEGORIES.includes(k) && typeof v[k] === "string");
     if (!isGroup) {
       const out = newObj();
-      for (const k of keys) out[k] = visit(v[k]);
+      for (const k of keys) out[k] = visit(v[k], path ? `${path}.${k}` : k);
       return out;
     }
     let needed: string[];
@@ -1934,15 +1987,29 @@ export function addNestedPluralForms(doc: unknown, targetLang: string): { doc: u
       needed = keys;
     }
     const other = v.other as string;
+    const otherPath = path ? `${path}.other` : "other";
+    const refresh = opts.otherStale?.(otherPath) ?? false;
     const out = newObj();
     for (const cat of CATEGORIES) {
-      if (keys.includes(cat)) out[cat] = v[cat];
-      else if (needed.includes(cat)) {
+      if (keys.includes(cat)) {
+        out[cat] = v[cat];
+        const catPath = path ? `${path}.${cat}` : cat;
+        if (cat === "other" || opts.hasSource?.(catPath)) continue;
+        const current = v[cat] as string;
+        if (opts.isEdited?.(catPath, current)) {
+          edited.push({ path: catPath, conflict: refresh });
+          continue;
+        }
+        if (!refresh || current === other) continue;
+        out[cat] = other;
+        derived.push({ path: catPath, value: other });
+      } else if (needed.includes(cat)) {
         out[cat] = other;
         added++;
+        derived.push({ path: path ? `${path}.${cat}` : cat, value: other });
       }
     }
     return out;
   };
-  return { doc: visit(doc), added };
+  return { doc: visit(doc, ""), added, derived, edited };
 }

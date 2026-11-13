@@ -63,44 +63,60 @@ function parsePair(pair: string | undefined): { source: string; written: string 
  * the 8 characters `hashOf` now produces — the same prefix of the same SHA-256
  * digest, so every existing hash still compares equal to a freshly computed
  * one; nothing needs re-translating just because of the migration itself.
+ *
+ * A file that doesn't exist yet starts fresh silently (first run, or the lock
+ * was never committed). A file that exists but fails to parse — most commonly
+ * unresolved `<<<<<<<` merge-conflict markers, since the README tells teams to
+ * commit this file — throws instead: silently treating it as "missing" would
+ * discard every edit/staleness record with no warning, and the next save
+ * would overwrite the conflict with a lock that looks cleanly resolved.
  */
 export function loadLock(file: string): LockFile {
+  let raw: string;
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { version?: unknown };
-    if (!parsed || typeof parsed !== "object") return { version: 3, entries: {} };
-    if ((parsed as { version?: unknown }).version === 3) {
-      const entries = (parsed as { entries?: unknown }).entries;
-      return { version: 3, entries: entries && typeof entries === "object" ? (entries as LockFile["entries"]) : {} };
-    }
-    const entries: LockFile["entries"] = {};
-    if ((parsed as { version?: unknown }).version === 2) {
-      const v2 = parsed as LockFileV2;
-      for (const [fk, paths] of Object.entries(v2.files ?? {})) {
-        for (const [p, entry] of Object.entries(paths ?? {})) {
-          const mt: Record<string, string> = {};
-          for (const [tag, state] of Object.entries(entry?.mt ?? {})) {
-            mt[tag] = `${state.source.slice(0, 8)}:${state.written.slice(0, 8)}`;
-          }
-          if (Object.keys(mt).length) entries[entryKey(fk, p)] = mt;
-        }
-      }
-      return { version: 3, entries };
-    }
-    const v1 = parsed as LockFileV1;
-    for (const [fk, paths] of Object.entries(v1.files ?? {})) {
+    raw = fs.readFileSync(file, "utf8");
+  } catch {
+    return { version: 3, entries: {} };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(
+      `${file} exists but isn't valid JSON — possibly an unresolved merge conflict. ` +
+        `Fix or delete it before continuing; translate/check won't guess at a broken lock. (${(e as Error).message})`,
+    );
+  }
+  if (!parsed || typeof parsed !== "object") return { version: 3, entries: {} };
+  if ((parsed as { version?: unknown }).version === 3) {
+    const entries = (parsed as { entries?: unknown }).entries;
+    return { version: 3, entries: entries && typeof entries === "object" ? (entries as LockFile["entries"]) : {} };
+  }
+  const entries: LockFile["entries"] = {};
+  if ((parsed as { version?: unknown }).version === 2) {
+    const v2 = parsed as LockFileV2;
+    for (const [fk, paths] of Object.entries(v2.files ?? {})) {
       for (const [p, entry] of Object.entries(paths ?? {})) {
         const mt: Record<string, string> = {};
-        for (const [tag, written] of Object.entries(entry?.mt ?? {})) {
-          mt[tag] = `${entry.source.slice(0, 8)}:${written.slice(0, 8)}`;
+        for (const [tag, state] of Object.entries(entry?.mt ?? {})) {
+          mt[tag] = `${state.source.slice(0, 8)}:${state.written.slice(0, 8)}`;
         }
         if (Object.keys(mt).length) entries[entryKey(fk, p)] = mt;
       }
     }
     return { version: 3, entries };
-  } catch {
-    // Missing or invalid: start fresh rather than fail the run.
   }
-  return { version: 3, entries: {} };
+  const v1 = parsed as LockFileV1;
+  for (const [fk, paths] of Object.entries(v1.files ?? {})) {
+    for (const [p, entry] of Object.entries(paths ?? {})) {
+      const mt: Record<string, string> = {};
+      for (const [tag, written] of Object.entries(entry?.mt ?? {})) {
+        mt[tag] = `${entry.source.slice(0, 8)}:${written.slice(0, 8)}`;
+      }
+      if (Object.keys(mt).length) entries[entryKey(fk, p)] = mt;
+    }
+  }
+  return { version: 3, entries };
 }
 
 /** One JSON object, but one entry per line (sorted for a stable diff) rather than `JSON.stringify`'s nested, multi-line-per-field layout — so a change to one key never shifts lines belonging to another. */
