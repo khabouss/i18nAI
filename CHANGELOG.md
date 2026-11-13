@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.8
+
+Five more parsing/engine bugs from the same external review, verified with reproductions before fixing ([khabouss/locale-ai#10](https://github.com/khabouss/locale-ai/issues/10)):
+
+- **Android `strings.xml`: `translatable='false'` (single quotes) wasn't recognized**, so a string marked that way was translated anyway. Both quote styles are now accepted.
+- **Android `strings.xml`: a commented-out `<string>` not immediately followed by a real element was read as live content** — the parser only recognized a `<!-- ... -->` block as a comment when it directly preceded another tag; a standalone one (at the end of the file, or followed by another comment) was scanned straight through, and tag-shaped text inside it got picked up as a real entry. Every comment not immediately attached to a following element is now excluded from matching entirely.
+- **XLIFF: `translate='no'` (single quotes) wasn't recognized**, same bug as the Android one above for XLIFF's own non-translatable flag.
+- **XLIFF: a self-closing `<target/>` produced a duplicate `<target>` on write** — the parser didn't recognize it as an existing target to replace, so serialize inserted a brand-new one right after `</source>` while leaving the original self-closing tag in place too. It's now replaced in place like any other `<target>`.
+- **The `_one` plural-grammar fix (retranslating with a literal "1" to get the right singular noun form) could restore the wrong "1".** If the source string already had its own unrelated literal "1" and translation reordered the two, the fix could silently freeze the actual count as a literal "1" while corrupting the unrelated one into `{{count}}`. It's now only applied when exactly one standalone "1" survives in the output — ambiguous results are left alone, keeping the normal (unfixed but uncorrupted) translation instead.
+
 ## 0.7.7
 
 Six correctness gaps in the incremental lock/rebuild pipeline, from an external code review verified against the source before fixing ([khabouss/locale-ai#8](https://github.com/khabouss/locale-ai/issues/8)):

@@ -673,6 +673,22 @@ test("Android strings.xml: inline <xliff:g> markup survives a write, @string/ re
   assert.match(out, /<string name="leading_space">"  rembourré des deux côtés  "<\/string>/);
 });
 
+test("Android strings.xml: translatable='false' (single quotes) is honored, and an orphan commented-out <string> isn't read as live", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-android-xml3-"));
+  const file = path.join(dir, "strings.xml");
+  const text = `<resources>
+    <string name="app_name">My App</string>
+    <string name="single_quoted" translatable='false'>DO_NOT_TRANSLATE</string>
+    <!--
+    <string name="old_unused">Should not appear, it's commented out at the end</string>
+    -->
+</resources>
+`;
+  fs.writeFileSync(file, text);
+  const doc = readLocaleDoc(file, "en", true, false);
+  assert.equal(JSON.stringify(doc.data), JSON.stringify({ app_name: "My App" }));
+});
+
 test("Apple .xcstrings: source extraction skips shouldTranslate=false/device variants, falls back to the key itself", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xcstrings-"));
   const file = path.join(dir, "Localizable.xcstrings");
@@ -1201,6 +1217,29 @@ test("XLIFF 1.2: inline <x>/<g> markup survives translation like any other prote
   assert.match(out3, /<target state="translated">Salut \(ancien\) !<\/target>/);
 });
 
+test("XLIFF 1.2: translate='no' (single quotes) is honored, and a self-closing <target/> is replaced in place rather than duplicated", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xliff-quotes-"));
+  const file = path.join(root, "messages.xlf");
+  const text = `<xliff version="1.2"><file source-language="en"><body>
+      <trans-unit id="hello">
+        <source>Hello</source>
+        <target/>
+      </trans-unit>
+      <trans-unit id="app.id" translate='no'>
+        <source>com.acme.app</source>
+      </trans-unit>
+    </body></file></xliff>
+`;
+  fs.writeFileSync(file, text);
+  const doc = readLocaleDoc(file, "en", true);
+  assert.equal(JSON.stringify(doc.data), JSON.stringify({ hello: "Hello" }));
+
+  const out = doc.serialize({ hello: "Bonjour" }, "fr");
+  assert.equal([...out.matchAll(/<target[ />]/g)].length, 1, "the self-closing <target/> must be replaced, not left alongside a new one");
+  assert.match(out, /<target>Bonjour<\/target>/);
+  assert.match(out, /<trans-unit id="app\.id" translate='no'>\s*<source>com\.acme\.app<\/source>\s*<\/trans-unit>/);
+});
+
 test("JS/TS locale modules: export default/module.exports, comments, nesting, arrays, quote/indent style kept; unsupported syntax fails clearly", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-js-"));
 
@@ -1697,6 +1736,29 @@ test("engine: several _one keys are retranslated in one batched model call, not 
   assert.equal(result.translations.get("You have {{count}} file"), "Vous avez {{count}} fichier");
   assert.equal(result.translations.get("You have {{count}} photo"), "Vous avez {{count}} photo");
   assert.equal(result.translations.get("You have {{count}} video"), "Vous avez {{count}} video");
+});
+
+test("engine: an ambiguous literal-1 restore (source already has its own unrelated \"1\") is skipped, keeping the safe main-pass output", async () => {
+  // The "literal 1" retry comes back with TWO standalone 1s (the pinned count, and the
+  // source's own unrelated literal "1", reordered) — restoring the first one found would
+  // silently freeze the real count as "1" and corrupt the unrelated "1" into {{count}}.
+  const tr: Translator = {
+    translate: async (texts) =>
+      texts.map((s) => {
+        if (s === "{0} of 1 total slots used") return "{0} of 1 total slots used (unfixed)";
+        if (s === "1 of 1 total slots used") return "1 total slots used of 1"; // ambiguous
+        return s;
+      }),
+    dispose: async () => {},
+  };
+  const source = "{{count}} of 1 total slots used";
+  const result = await translateStrings([source], [tr], {
+    sourceLang: "en",
+    targetLang: "fr",
+    batchSize: 4,
+    singularHints: new Set([source]),
+  });
+  assert.equal(result.translations.get(source), "{{count}} of 1 total slots used (unfixed)");
 });
 
 test("custom models: config entries win over built-ins, prefixes per target", async () => {
