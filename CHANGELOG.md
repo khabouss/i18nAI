@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.3
+
+More from the same external review:
+
+- **XLIFF dropped `<context-group>`** (and any other `<trans-unit>` child besides `<source>`/`<target>`/`<note>`) when writing a target file. The target is now built by replacing only the `<target>` element in place rather than reconstructing the whole unit, so everything else — `<context-group>`, `<alt-trans>`, anything else XLIFF allows there — rides through untouched.
+- **`.properties` wrote a translated value as raw UTF-8 even when the source used a `\uXXXX` escape for it.** The escape convention is now tracked per key and kept on write.
+- The README's "Format notes" section (one ~700-word paragraph covering every format) is now [docs/formats.md](docs/formats.md), one section per format; the README itself stays a quickstart.
+
 ## 0.7.2
 
 Three Android `strings.xml` bugs found by the same external review, all from its regex-based parsing not accounting for Android-specific value conventions:

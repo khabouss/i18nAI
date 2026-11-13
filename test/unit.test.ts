@@ -890,6 +890,24 @@ leading.space=[FR]  padded
   assert.equal(rerun, edited);
 });
 
+test("Java .properties: a key whose source value uses \\uXXXX escapes keeps using them on write, instead of switching to raw UTF-8", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-properties-unicode-"));
+  const file = path.join(root, "en.properties");
+  fs.writeFileSync(file, "greeting=Caf\\u00e9 reward\nplain=Plain text\n");
+  const doc = readLocaleDoc(file, "en", true);
+  assert.equal(JSON.stringify(doc.data), JSON.stringify({ greeting: "Café reward", plain: "Plain text" }));
+
+  // First write (no existing target): the source's own \u-escape convention is followed per key.
+  const out = doc.serialize({ greeting: "Récompense café", plain: "Texte simple" }, "fr");
+  assert.equal(out, "greeting=R\\u00e9compense caf\\u00e9\nplain=Texte simple\n");
+
+  // Rewriting an existing target that itself used raw UTF-8 for a key keeps THAT key's own convention,
+  // even though the source used an escape for it.
+  const existingFr = "greeting=Ancien\nplain=Ancien aussi\n";
+  const rerun = doc.serialize({ greeting: "Nouveau café", plain: "Nouveau aussi" }, "fr", existingFr);
+  assert.equal(rerun, "greeting=Nouveau café\nplain=Nouveau aussi\n");
+});
+
 test("XLIFF 1.2: detection via --input (untagged source), target filename convention, source-language mismatch is rejected", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xliff-"));
   const file = path.join(root, "messages.xlf");
@@ -925,6 +943,10 @@ test("XLIFF 1.2: inline <x>/<g> markup survives translation like any other prote
         <body>
             <trans-unit id="greeting" datatype="html">
                 <source>Hello <x id="INTERPOLATION" equiv-text="{{name}}"/>!</source>
+                <context-group purpose="location">
+                    <context context-type="sourcefile">src/app.component.html</context>
+                    <context context-type="linenumber">12</context>
+                </context-group>
                 <note priority="1" from="description">A friendly greeting</note>
             </trans-unit>
             <trans-unit id="bold.text" datatype="html">
@@ -958,10 +980,32 @@ test("XLIFF 1.2: inline <x>/<g> markup survives translation like any other prote
   assert.match(out, /<target>Bonjour <x id="INTERPOLATION" equiv-text="\{\{name\}\}"\/> !<\/target>/);
   assert.match(out, /<target>Ceci est <g id="1">gras<\/g>\.<\/target>/);
   assert.match(out, /<note priority="1" from="description">A friendly greeting<\/note>/);
+  // <context-group> (and everything else besides <source>/<target>) rides through untouched, in its original position.
+  assert.match(out, /<context-group purpose="location">\s*<context context-type="sourcefile">src\/app\.component\.html<\/context>\s*<context context-type="linenumber">12<\/context>\s*<\/context-group>/);
   // translate="no" and the bpt/ept unit are reproduced byte-for-byte, no <target> added.
   assert.match(out, /<trans-unit id="app\.id" datatype="html" translate="no">\s*<source>com\.acme\.app<\/source>\s*<\/trans-unit>/);
   assert.ok(!/<trans-unit id="legacy\.paired">[\s\S]*?<target>/.test(out));
   assert.match(out, /target-language="fr"/);
+
+  // A unit that already has a <target> (e.g. an XLIFF produced by another tool,
+  // or a second locale group in the same file): only the <target> element itself
+  // is replaced, in place — the context-group isn't duplicated or dropped.
+  const withTarget = path.join(root, "with-target.xlf");
+  fs.writeFileSync(
+    withTarget,
+    `<xliff version="1.2"><file source-language="en"><body>
+      <trans-unit id="greeting">
+        <source>Hi!</source>
+        <context-group purpose="location"><context context-type="sourcefile">x.html</context></context-group>
+        <target state="translated">Salut (ancien) !</target>
+      </trans-unit>
+    </body></file></xliff>\n`,
+  );
+  const doc2 = readLocaleDoc(withTarget, "en", true);
+  const out2 = doc2.serialize({ greeting: "Salut !" }, "fr");
+  assert.match(out2, /<target>Salut !<\/target>/);
+  assert.match(out2, /<context-group purpose="location">/);
+  assert.equal([...out2.matchAll(/<target[ >]/g)].length, 1);
 });
 
 test("JS/TS locale modules: export default/module.exports, comments, nesting, arrays, quote/indent style kept; unsupported syntax fails clearly", () => {

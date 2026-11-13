@@ -459,6 +459,23 @@ function escapeProperties(s: string): string {
   return out;
 }
 
+/**
+ * Like `escapeProperties`, but also escaping every non-ASCII UTF-16 code unit as
+ * `\uXXXX` (an astral character's surrogate pair becomes two such escapes, matching
+ * how Java's own `native2ascii` encodes one) — for a key whose source value used
+ * `\uXXXX` escapes rather than literal UTF-8, so the project's own escaping
+ * convention for that key is kept instead of switching it to raw UTF-8 on write.
+ */
+function escapePropertiesUnicode(s: string): string {
+  const escaped = escapeProperties(s);
+  let out = "";
+  for (let i = 0; i < escaped.length; i++) {
+    const code = escaped.charCodeAt(i);
+    out += code > 0x7e ? `\\u${code.toString(16).padStart(4, "0")}` : escaped[i];
+  }
+  return out;
+}
+
 /** True when `s` ends in an odd run of backslashes — Java's line-continuation rule. */
 const endsWithContinuation = (s: string) => (/\\*$/.exec(s)![0].length % 2 === 1);
 
@@ -485,10 +502,11 @@ function splitPropertyLine(line: string): { key: string; valueStart: number } | 
 type PropBlock = { text: string } | { key: string; prefix: string };
 
 /** Parses `.properties` text into passthrough lines (comments, blank lines, unparsable lines) and key/value entries. */
-function parsePropertiesBlocks(text: string): { blocks: PropBlock[]; data: Obj } {
+function parsePropertiesBlocks(text: string): { blocks: PropBlock[]; data: Obj; unicodeKeys: Set<string> } {
   const physical = text.split(/\r?\n/);
   const blocks: PropBlock[] = [];
   const data = newObj();
+  const unicodeKeys = new Set<string>();
   let i = 0;
   while (i < physical.length) {
     const line = physical[i];
@@ -509,10 +527,11 @@ function parsePropertiesBlocks(text: string): { blocks: PropBlock[]; data: Obj }
       valueRaw = valueRaw.slice(0, -1) + physical[++i].replace(/^[ \t\f]+/, "");
     }
     data[split.key] = unescapeProperties(valueRaw);
+    if (/\\u[0-9a-fA-F]{4}/.test(valueRaw)) unicodeKeys.add(split.key);
     blocks.push({ key: split.key, prefix: line.slice(0, split.valueStart) });
     i++;
   }
-  return { blocks, data };
+  return { blocks, data, unicodeKeys };
 }
 
 /**
@@ -529,22 +548,26 @@ function parsePropertiesBlocks(text: string): { blocks: PropBlock[]; data: Obj }
  * (`\`-continued) value is always collapsed to one line when it's rewritten, though —
  * only an *unchanged* continued value keeps its original multi-line layout. A line
  * with no unescaped `=`/`:` at all (so not a recognizable `key=value` pair) is passed
- * through untouched rather than guessed at.
+ * through untouched rather than guessed at. A key whose value used `\uXXXX` escapes
+ * (rather than literal UTF-8) keeps using them when rewritten, instead of switching to
+ * raw UTF-8.
  */
 function readPropertiesDoc(file: string, text: string): LocaleDoc {
-  const { blocks, data } = parsePropertiesBlocks(text);
+  const { blocks, data, unicodeKeys } = parsePropertiesBlocks(text);
   const serialize = (d: unknown, _targetTag: string, existingText?: string): string => {
     const obj = isObj(d) ? d : newObj();
-    const baseBlocks = existingText !== undefined ? parsePropertiesBlocks(existingText).blocks : blocks;
+    const base = existingText !== undefined ? parsePropertiesBlocks(existingText) : { blocks, unicodeKeys };
+    const escapeFor = (k: string) => (base.unicodeKeys.has(k) ? escapePropertiesUnicode : escapeProperties);
     const seen = new Set<string>();
-    const lines = baseBlocks.map((b) => {
+    const lines = base.blocks.map((b) => {
       if (!("key" in b)) return b.text;
       seen.add(b.key);
-      return `${b.prefix}${escapeProperties(typeof obj[b.key] === "string" ? (obj[b.key] as string) : "")}`;
+      return `${b.prefix}${escapeFor(b.key)(typeof obj[b.key] === "string" ? (obj[b.key] as string) : "")}`;
     });
     for (const k of Object.keys(obj)) {
       if (seen.has(k) || typeof obj[k] !== "string") continue;
-      lines.push(`${k}=${escapeProperties(obj[k] as string)}`);
+      // Never-before-seen key: no target-side convention to follow, so fall back to the source's own.
+      lines.push(`${k}=${(unicodeKeys.has(k) ? escapePropertiesUnicode : escapeProperties)(obj[k] as string)}`);
     }
     return lines.join("\n");
   };
@@ -740,13 +763,14 @@ function setXmlAttr(tag: string, name: string, value: string): string {
 
 interface XliffUnit {
   id: string;
-  attrsRaw: string;
   translatable: boolean;
   sourceInner: string;
   targetInner?: string;
-  noteBlock: string;
+  /** Raw text of the matched `<target ...>...</target>` element, attributes included — spliced out wholesale on serialize. Undefined when the unit has no `<target>` yet (first translation). */
+  targetWhole?: string;
+  /** The full, untouched `<trans-unit ...>...</trans-unit>` text — every other child (`<context-group>`, `<alt-trans>`, `<note>`, anything else XLIFF allows there) rides along in this unchanged, since only the `<target>` span within it is ever replaced. */
   whole: string;
-  /** The opening `<trans-unit>` tag's own indent, so a regenerated unit matches its actual nesting depth, not a single document-wide guess. */
+  /** The opening `<trans-unit>` tag's own indent, so a newly inserted `<target>` (no prior translation) matches its actual nesting depth, not a single document-wide guess. */
   indent: string;
 }
 type XliffSegment = { text: string } | { unit: number };
@@ -767,16 +791,14 @@ function parseXliffUnits(text: string): { segments: XliffSegment[]; units: Xliff
       segments.push({ text: whole });
     } else {
       const targetMatch = /<target\b[^>]*>([\s\S]*?)<\/target>/.exec(inner);
-      const noteMatch = /<note\b[^>]*>[\s\S]*?<\/note>/.exec(inner);
       const translatable = !/\btranslate\s*=\s*"no"/.test(attrsRaw) && !/<(?:bpt|ept)\b/.test(sourceMatch[1]);
       const lineIndent = /[ \t]*$/.exec(before)![0];
       units.push({
         id: unescapeXml(idMatch[1]),
-        attrsRaw,
         translatable,
         sourceInner: sourceMatch[1],
         targetInner: targetMatch?.[1],
-        noteBlock: noteMatch?.[0] ?? "",
+        targetWhole: targetMatch?.[0],
         whole,
         indent: before.includes("\n") ? lineIndent : "",
       });
@@ -798,12 +820,16 @@ function parseXliffUnits(text: string): { segments: XliffSegment[]; units: Xliff
  * (`<b>`, `<Trans/>`), so it survives untouched with zero extra code. `translate="no"`
  * units, and the rarer `<bpt>`/`<ept>` paired-tag markup (a different, non-nesting
  * convention XLIFF also allows but modern tools rarely emit), are left completely
- * untouched instead. `<note>` comments are kept from the source.
+ * untouched instead.
  *
- * Like Android/ARB/`.xcstrings`, this regenerates each unit from the *source's* own
- * structure every run rather than editing an existing target in place — a translator's
- * own `<target state="...">` attribute (if any) won't survive a rerun, the same
- * documented tradeoff Android already makes for its own comments.
+ * Unlike Android/ARB/`.xcstrings` (which regenerate the whole entry from the source
+ * every run), only the `<target>` element itself is ever replaced — every other child
+ * a `<trans-unit>` can have (`<note>`, `<context-group>` recording where the string is
+ * used in the app's own source, `<alt-trans>`, ...) rides through completely untouched,
+ * in its original position, since the rest of the unit's text is never regenerated. A
+ * translator's own `<target state="...">` attribute is the one exception: a fresh
+ * `<target>` (no attributes) replaces it wholesale on a rerun, the same documented
+ * tradeoff Android already makes for comments on an already-translated string.
  *
  * Only reached via `--input <file>.xlf`/`.xliff`: the source file's name carries no
  * locale tag at all (XLIFF puts it in `source-language` instead), so there's no
@@ -834,9 +860,10 @@ function readXliffDoc(file: string, text: string, isSource: boolean): LocaleDoc 
       const u = units[seg.unit];
       if (!u.translatable) return u.whole;
       const v = typeof obj[u.id] === "string" ? (obj[u.id] as string) : "";
-      const inner = u.indent + step;
-      const noteLine = u.noteBlock ? `\n${inner}${u.noteBlock}` : "";
-      return `<trans-unit${u.attrsRaw}>\n${inner}<source>${u.sourceInner}</source>\n${inner}<target>${escapeXmlKeepTags(v)}</target>${noteLine}\n${u.indent}</trans-unit>`;
+      const newTarget = `<target>${escapeXmlKeepTags(v)}</target>`;
+      if (u.targetWhole) return u.whole.replace(u.targetWhole, newTarget);
+      // No <target> yet (first translation): insert one right after </source>, at <source>'s own indent.
+      return u.whole.replace(/<\/source>/, (m) => `${m}\n${u.indent + step}${newTarget}`);
     });
     return withNewline(parts.join(""), keepNewline);
   };
