@@ -98,12 +98,28 @@ export interface ProjectConfig {
 
 export const CONFIG_FILE = "locale-ai.config.json";
 
-export function loadConfig(cwd: string, file?: string): ProjectConfig {
-  const p = path.resolve(cwd, file ?? CONFIG_FILE);
-  if (!fs.existsSync(p)) {
-    if (file) throw new Error(`Config file not found: ${file}`);
-    return { dir: cwd };
+/**
+ * Walks up from `dir` looking for `locale-ai.config.json`, the same way
+ * eslint/prettier find their own config — so running from a subdirectory (or
+ * with `--input ../locales` pointing elsewhere) still finds a config.json
+ * sitting at the project root instead of silently skipping `doNotTranslate`/
+ * `glossary` and picking a different lockfile location than a run from the
+ * root would. Stops at the first directory holding `.git` (checking that
+ * directory itself first) so it never wanders into an unrelated ancestor
+ * project, and otherwise stops at the filesystem root.
+ */
+function findConfigUp(dir: string): string | undefined {
+  for (;;) {
+    const candidate = path.join(dir, CONFIG_FILE);
+    if (fs.existsSync(candidate)) return candidate;
+    if (fs.existsSync(path.join(dir, ".git"))) return undefined;
+    const parent = path.dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
   }
+}
+
+function readConfigFile(p: string): ProjectConfig {
   try {
     const cfg = JSON.parse(fs.readFileSync(p, "utf8")) as ProjectConfig;
     if (cfg.doNotTranslate && !Array.isArray(cfg.doNotTranslate)) throw new Error('"doNotTranslate" must be an array');
@@ -113,6 +129,16 @@ export function loadConfig(cwd: string, file?: string): ProjectConfig {
   } catch (e) {
     throw new Error(`Invalid ${path.basename(p)}: ${(e as Error).message}`);
   }
+}
+
+export function loadConfig(cwd: string, file?: string): ProjectConfig {
+  if (file) {
+    const p = path.resolve(cwd, file);
+    if (!fs.existsSync(p)) throw new Error(`Config file not found: ${file}`);
+    return readConfigFile(p);
+  }
+  const p = findConfigUp(cwd);
+  return p ? readConfigFile(p) : { dir: cwd };
 }
 
 function builtinColumn(target: Locale): number {

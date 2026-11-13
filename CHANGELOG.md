@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.7
+
+Six correctness gaps in the incremental lock/rebuild pipeline, from an external code review verified against the source before fixing ([khabouss/locale-ai#8](https://github.com/khabouss/locale-ai/issues/8)):
+
+- **`_few`/`_many` plural forms, derived once from `_other`, were never resynced.** When `_other`'s source text changed and got re-translated, its already-derived `_few`/`_many`/etc. stayed frozen with the original wording forever, with no warning from `check`. They now resync whenever `_other` is re-translated — unless a translator hand-edited that specific derived form, in which case it's left alone and flagged as a conflict (same "never silently overwrite an edit" rule as every other key) instead of being resynced or re-flagged twice.
+- **`locale-ai accept` with no keys given accepted every key, not just hand-edited ones** — silently marking a genuinely outdated (source-changed-since-translated) entry as reviewed too, so `check` stopped catching it. It now only auto-accepts entries actually flagged as edited; an explicit `accept <key>` still accepts that exact key unconditionally, and can now also clear a conflict on a plural-derived key (previously impossible, since derived keys have no source counterpart for `accept` to match against).
+- **A lockfile that failed to parse was treated identically to a missing one** — silently discarded, then overwritten by the next save. Since the README tells teams to commit the lockfile, an unresolved merge conflict (stray `<<<<<<<` markers) destroyed all edit/staleness history with no warning. It now throws instead of guessing.
+- **The project config was only looked up in the exact working directory.** Running from a subdirectory (or with `--input ../locales`) silently missed a `locale-ai.config.json` at the project root. It now walks up parent directories like eslint/prettier, stopping at the first `.git` it finds.
+- **A translation that fell back to the untranslated source text was recorded as done**, and never retried on a later run. Such entries are now excluded from the lock, so the next run retries them.
+- **The lock file was saved once, after every locale in a run finished**, so interrupting the process after locale 1 of 3 lost locale 1's lock updates too, even though its target file was already written. It's now saved after each locale finishes.
+
 ## 0.7.6
 
 Findings from testing the published package as a real first-time user (a French-source app adding en/ar/pt):

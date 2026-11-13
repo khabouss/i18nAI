@@ -66,9 +66,9 @@ Usage:
                         translating anything. Exits non-zero on a mismatch (CI-friendly).
   locale-ai accept [--to <locales>] [--from <locale>] [--input <dir>] [--config <file>] [key...]
                         Approve a translator's hand edit at <key> (or, with no key given,
-                        every key for the chosen locale(s)) as final: the lock stops
-                        flagging it as "edited" on future runs. Never changes the file
-                        itself — only what the lock remembers it last wrote there.
+                        every key currently flagged as edited for the chosen locale(s)) as
+                        final: the lock stops flagging it on future runs. Never changes the
+                        file itself — only what the lock remembers it last wrote there.
   locale-ai models list [--from <locale>]
   locale-ai models installed
   locale-ai models install <from-to | model-id> [--yes]
@@ -319,6 +319,11 @@ async function cmdTranslate(argv: string[]): Promise<number> {
   for (const job of jobs) {
     const started = Date.now();
     let translations = new Map<string, string>();
+    // Sources whose only result was the last-resort placeholder-fallback path this run —
+    // a degraded, best-effort output, not a real translation. Excluded from what gets
+    // recorded as "done" below so they stay pending and get retried (and still flagged
+    // for review) on the next run, instead of being locked in forever.
+    let unresolved = new Set<string>();
     if (job.unique > 0) {
       const translators: Translator[] = [];
       for (const hop of job.route) {
@@ -340,6 +345,7 @@ async function cmdTranslate(argv: string[]): Promise<number> {
       });
       endStatus();
       translations = result.translations;
+      unresolved = new Set(result.issues.filter((i) => i.kind === "placeholder-fallback").map((i) => i.source));
       allIssues.push(...result.issues.map((i) => ({ ...i, locale: job.locale.tag })));
       for (const hop of job.route) {
         const k = key(hop);
@@ -355,20 +361,43 @@ async function cmdTranslate(argv: string[]): Promise<number> {
     for (const f of job.files) {
       const lockKey = fileKey(f.source, lockDir);
       const srcFlat = flattenStrings(f.doc.data);
+      const srcPaths = new Set(srcFlat.map((e) => e.path));
       const isStale = staleNotEdited(lock, lockKey, f.existing, job.locale.tag);
       if (f.existing !== undefined) {
         const srcByPath = new Map(srcFlat.map((e) => [e.path, e.value]));
+        // A plural-derived path (no real source counterpart) is reported by the dedicated
+        // plural-sync pass below instead, which — unlike this generic sweep — actually
+        // knows whether the "other" it's derived from changed, so it can tell "edited"
+        // from "conflict" correctly instead of only ever reporting "edited" here.
         for (const editedPath of editedPaths(lock, lockKey, job.locale.tag, flattenStrings(f.existing))) {
+          if (!srcPaths.has(editedPath)) continue;
           const srcVal = srcByPath.get(editedPath);
           const alsoStale = srcVal !== undefined && isSourceStale(lock, lockKey, editedPath, job.locale.tag, srcVal);
           allIssues.push({ source: editedPath, kind: alsoStale ? "conflict" : "edited", locale: job.locale.tag });
         }
       }
       const built = buildTarget(f.doc.data, f.existing, (s) => translations.get(s) ?? s, values.overwrite!, isProtectedKey, isStale);
-      let plural = usesI18nextPlurals(f.source) ? addPluralForms(built, intlCode(job.locale)) : { doc: built, added: 0 };
-      const nested = addNestedPluralForms(plural.doc, intlCode(job.locale));
-      plural = { doc: nested.doc, added: plural.added + nested.added };
+      const translatedSet = new Set(translatedPaths(f.doc.data, f.existing, values.overwrite!, isProtectedKey, isStale));
+      // A plural group's derived zero/two/few/many siblings only exist in the target, never
+      // the source, so the lock can't track them by source-hash the normal way — resync
+      // them whenever the group's "other" sibling was itself just (re)translated, and treat
+      // a hand edit on one of them exactly like a hand edit anywhere else (see lock.ts).
+      const pluralOpts = {
+        otherStale: (p: string) => translatedSet.has(p),
+        isEdited: (p: string, v: string) => isEdited(lock, lockKey, p, job.locale.tag, v),
+        hasSource: (p: string) => srcPaths.has(p),
+      };
+      const i18next = usesI18nextPlurals(f.source)
+        ? addPluralForms(built, intlCode(job.locale), pluralOpts)
+        : { doc: built, added: 0, derived: [], edited: [] };
+      const nested = addNestedPluralForms(i18next.doc, intlCode(job.locale), pluralOpts);
+      const plural = { doc: nested.doc, added: i18next.added + nested.added };
+      const pluralDerived = [...i18next.derived, ...nested.derived];
+      const pluralEdited = [...i18next.edited, ...nested.edited];
       pluralsAdded += plural.added;
+      for (const { path: p, conflict } of pluralEdited) {
+        allIssues.push({ source: p, kind: conflict ? "conflict" : "edited", locale: job.locale.tag });
+      }
       const before = fs.existsSync(f.target) ? fs.readFileSync(f.target, "utf8") : undefined;
       const text = f.doc.serialize(plural.doc, job.locale.tag, before);
       if (text !== before) {
@@ -377,15 +406,26 @@ async function cmdTranslate(argv: string[]): Promise<number> {
         written++;
       }
       const outFlat = new Map(flattenStrings(plural.doc).map((e) => [e.path, e.value]));
-      const translatedSet = new Set(translatedPaths(f.doc.data, f.existing, values.overwrite!, isProtectedKey, isStale));
       recordEntries(
         lock,
         lockKey,
         job.locale.tag,
-        srcFlat.filter(({ path: p }) => translatedSet.has(p)).map(({ path: p, value }) => ({ path: p, source: value, written: outFlat.get(p) ?? "" })),
+        srcFlat
+          .filter(({ path: p, value }) => translatedSet.has(p) && !unresolved.has(value))
+          .map(({ path: p, value }) => ({ path: p, source: value, written: outFlat.get(p) ?? "" })),
       );
-      pruneDeletedKeys(lock, lockKey, srcFlat.map((e) => e.path));
+      recordEntries(lock, lockKey, job.locale.tag, pluralDerived.map(({ path: p, value }) => ({ path: p, source: value, written: value })));
+      // A hand-edited derived path keeps its existing lock entry too, even though this run
+      // didn't touch it — otherwise pruning it here (since it's in neither the source nor
+      // this run's derived list) would un-track it, and the NEXT run, seeing no lock entry
+      // at all, would treat it as never-edited and silently overwrite the hand edit.
+      pruneDeletedKeys(lock, lockKey, [
+        ...srcFlat.map((e) => e.path),
+        ...pluralDerived.map((d) => d.path),
+        ...pluralEdited.map((e) => e.path),
+      ]);
     }
+    if (jobs.length) saveLock(lockPath, lock); // after every locale, not just at the very end — an interrupted run keeps what it already finished
     const secs = ((Date.now() - started) / 1000).toFixed(1);
     const issues = allIssues.filter((i) => i.locale === job.locale.tag).length;
     const via = job.route.length > 1 ? ` (via ${job.route.map((h) => h.model.id).join(" → ")})` : "";
@@ -396,9 +436,9 @@ async function cmdTranslate(argv: string[]): Promise<number> {
     );
   }
   for (const t of loaded.values()) await t.dispose();
-  if (jobs.length) {
-    saveLock(lockPath, lock);
-    if (!lockExisted) log(`\nCreated ${rel(lockPath)} — commit it so other runs (and \`locale-ai check\`) see the same history.`);
+  // The lock is already saved after each locale above; this is just the first-run log line.
+  if (jobs.length && !lockExisted) {
+    log(`\nCreated ${rel(lockPath)} — commit it so other runs (and \`locale-ai check\`) see the same history.`);
   }
 
   if (allIssues.length) {
@@ -595,12 +635,16 @@ async function cmdCheck(argv: string[]): Promise<number> {
 }
 
 /**
- * Approves the current on-disk target text at one or more keys (or, with no
- * keys given, every key the target file and source share) as this tool's own
- * — so a future `translate`/`check` run stops reporting it under the
- * "edited" issue kind. The file on disk is never touched; only the lock's
- * record of what this tool last wrote there is advanced to match, the same
- * as if it had just (re)written that exact text itself.
+ * Approves the current on-disk target text as this tool's own, so a future
+ * `translate`/`check` run stops reporting it under the "edited" issue kind.
+ * With explicit keys, those keys are accepted unconditionally (an explicit
+ * ask always wins). With no keys given, only paths the lock currently flags
+ * as edited are accepted — NOT every key the target and source share, which
+ * would also silently accept a genuinely outdated (source changed since
+ * translated) entry nobody reviewed, defeating `check`'s staleness check.
+ * The file on disk is never touched; only the lock's record of what this
+ * tool last wrote there is advanced to match, the same as if it had just
+ * (re)written that exact text itself.
  */
 async function cmdAccept(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
@@ -632,12 +676,17 @@ async function cmdAccept(argv: string[]): Promise<number> {
     for (const { file, doc } of sources) {
       const target = targetFile(layout, from.tag, to, file);
       if (!fs.existsSync(target)) continue;
+      const lockKey = fileKey(file, lockDir);
       const srcByPath = new Map(flattenStrings(doc.data).map((e) => [e.path, e.value]));
+      // A plural-derived path (e.g. "item_few") has no source counterpart at all — the
+      // same self-referential source==written convention `translate` records it with
+      // (see cmdTranslate) is used here too, so accepting one of these actually clears
+      // its "conflict"/"edited" status instead of silently matching nothing.
       const entries = flattenStrings(readLocaleDoc(target, to).data)
-        .filter((e) => (!wanted || wanted.has(e.path)) && srcByPath.has(e.path))
-        .map((e) => ({ path: e.path, source: srcByPath.get(e.path)!, written: e.value }));
+        .filter((e) => (wanted ? wanted.has(e.path) : isEdited(lock, lockKey, e.path, to, e.value)))
+        .map((e) => ({ path: e.path, source: srcByPath.get(e.path) ?? e.value, written: e.value }));
       if (!entries.length) continue;
-      recordEntries(lock, fileKey(file, lockDir), to, entries);
+      recordEntries(lock, lockKey, to, entries);
       accepted += entries.length;
     }
   }
