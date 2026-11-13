@@ -72,7 +72,8 @@ Translate options:
   --from <locale>       Source locale (default: en)
   --to <locales>        Target locale(s), comma separated: fr,es,pt-BR
   --input <dir>         Folder containing <from>/ or <from>.json/.yaml/.yml/.po/.pot/.arb/.strings,
-                        or an Android res/ folder (values/strings.xml) (auto-detected)
+                        an Android res/ folder (values/strings.xml) (auto-detected),
+                        or a path straight to a .xcstrings catalog (not auto-detected)
   --overwrite           Re-translate strings that already have a translation
   --dry-run             Show what would be translated without downloading or writing
   --fast                Greedy decoding: ~2x faster, slightly lower quality
@@ -225,8 +226,10 @@ async function cmdTranslate(argv: string[]): Promise<number> {
   const singularHints = new Set(sources.flatMap(({ doc }) => [...pluralOneStrings(doc.data)]));
   log(`locale-ai ${VERSION}`);
   log(
-    `Found ${sources.length} ${from.tag} file${sources.length === 1 ? "" : "s"} in ${rel(layout.root)}/` +
-      (layout.kind === "dir" ? `${from.tag}${layout.dirSuffix ?? ""}/` : ""),
+    layout.kind === "xcstrings"
+      ? `Found ${from.tag} strings in ${rel(layout.file!)}`
+      : `Found ${sources.length} ${from.tag} file${sources.length === 1 ? "" : "s"} in ${rel(layout.root)}/` +
+          (layout.kind === "dir" ? `${from.tag}${layout.dirSuffix ?? ""}/` : ""),
   );
 
   let failures = 0;

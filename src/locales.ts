@@ -5,17 +5,20 @@ import { parseLocale } from "./lang.ts";
 
 /**
  * Supported layouts:
- *   dir:     <root>/en/common.json, <root>/en/auth/login.json  ->  <root>/fr/...
- *   file:    <root>/en.json                                    ->  <root>/fr.json
- *   android: <root>/values/strings.xml                         ->  <root>/values-fr/strings.xml
+ *   dir:        <root>/en/common.json, <root>/en/auth/login.json  ->  <root>/fr/...
+ *   file:       <root>/en.json                                    ->  <root>/fr.json
+ *   android:    <root>/values/strings.xml                         ->  <root>/values-fr/strings.xml
+ *   xcstrings:  <file>.xcstrings (every locale, source included, lives inside this one file)
  *
  * dir and file both accept ".json", ".yaml", ".yml", ".po", ".arb" or ".strings"
  * files, independently per file. android is its own thing: the file is always named
  * "strings.xml", and the locale lives in the untagged "values" (source) vs.
- * "values-<qualifier>" (target) directory name instead of the file name.
+ * "values-<qualifier>" (target) directory name instead of the file name. xcstrings is
+ * the odd one out: there's no per-locale file to find, so it's only ever reached via
+ * an explicit `--input <file>.xcstrings` rather than auto-detected from CANDIDATES.
  */
 export interface Layout {
-  kind: "dir" | "file" | "android";
+  kind: "dir" | "file" | "android" | "xcstrings";
   root: string;
   /** For kind "file": the source file's extension (e.g. ".json", ".po"). */
   ext?: string;
@@ -23,6 +26,8 @@ export interface Layout {
   prefix?: string;
   /** For kind "dir": a suffix appended to the locale tag to name the directory (Apple's "en.lproj"). */
   dirSuffix?: string;
+  /** For kind "xcstrings": the one catalog file every locale (including the source) lives in. */
+  file?: string;
 }
 
 const EXTENSIONS = [".json", ".yaml", ".yml", ".po", ".pot", ".arb", ".strings"];
@@ -126,6 +131,19 @@ export function detectLayout(cwd: string, from: string, input?: string): Layout 
     if (path.basename(abs) === "values" && isFile(path.join(abs, "strings.xml"))) {
       return { kind: "android", root: path.dirname(abs) };
     }
+    if (abs.endsWith(".xcstrings") && isFile(abs)) {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(readText(abs));
+      } catch (e) {
+        throw new Error(`Invalid .xcstrings (JSON) in ${input}: ${(e as Error).message}`);
+      }
+      const sourceLanguage = (raw as { sourceLanguage?: unknown } | null)?.sourceLanguage;
+      if (typeof sourceLanguage === "string" && sourceLanguage !== from) {
+        throw new Error(`${input} has sourceLanguage "${sourceLanguage}", not "${from}" — pass --from ${sourceLanguage}.`);
+      }
+      return { kind: "xcstrings", root: path.dirname(abs), file: abs };
+    }
     const base = path.basename(abs);
     const directExt = EXTENSIONS.find((ext) => base === `${from}${ext}`);
     if (directExt && isFile(abs)) return { kind: "file", root: path.dirname(abs), ext: directExt };
@@ -160,6 +178,7 @@ function listLocaleFiles(dir: string): string[] {
 
 export function sourceFiles(layout: Layout, from: string): string[] {
   if (layout.kind === "android") return [path.join(layout.root, "values", "strings.xml")];
+  if (layout.kind === "xcstrings") return [layout.file!];
   return layout.kind === "dir"
     ? listLocaleFiles(path.join(layout.root, dirNameFor(layout, from)))
     : [path.join(layout.root, fileNameFor(layout, from, layout.ext!))];
@@ -170,6 +189,7 @@ const outputExt = (ext: string) => (ext === ".pot" ? ".po" : ext);
 
 export function targetFile(layout: Layout, from: string, to: string, src: string): string {
   if (layout.kind === "android") return path.join(layout.root, `values-${androidQualifier(to)}`, "strings.xml");
+  if (layout.kind === "xcstrings") return layout.file!;
   if (layout.kind === "file") return path.join(layout.root, fileNameFor(layout, to, outputExt(layout.ext!)));
   const rel = path.relative(path.join(layout.root, dirNameFor(layout, from)), src);
   const ext = path.extname(rel);
@@ -188,6 +208,22 @@ function looksLikeLocale(tag: string): boolean {
 
 /** Locale tags already translated alongside `from` in this layout (for `locale-ai check`). */
 export function existingTargets(layout: Layout, from: string): string[] {
+  if (layout.kind === "xcstrings") {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readText(layout.file!));
+    } catch {
+      return [];
+    }
+    const strings = isObj(raw) && isObj((raw as Obj).strings) ? ((raw as Obj).strings as Obj) : {};
+    const tags = new Set<string>();
+    for (const entry of Object.values(strings)) {
+      if (!isObj(entry) || !isObj(entry.localizations)) continue;
+      for (const tag of Object.keys(entry.localizations as Obj)) tags.add(tag);
+    }
+    tags.delete(from);
+    return [...tags].filter(looksLikeLocale).sort();
+  }
   if (layout.kind === "android") {
     return fs
       .readdirSync(layout.root, { withFileTypes: true })
@@ -507,6 +543,115 @@ function readArbDoc(file: string, text: string): LocaleDoc {
   return { data, serialize };
 }
 
+/** True when `entry` uses a per-device variant (`variations.iphone`/`.ipad`/...) for `tag`, not just a plural. */
+function xcstringsHasDeviceVariant(entry: Obj): boolean {
+  const locs = entry.localizations;
+  if (!isObj(locs)) return false;
+  return Object.values(locs).some(
+    (loc) => isObj(loc) && isObj(loc.variations) && Object.keys(loc.variations as Obj).some((k) => k !== "plural"),
+  );
+}
+
+/** `shouldTranslate: false`, multi-variable `substitutions`, or any per-device variant — left untouched. */
+function xcstringsSkip(entry: unknown): boolean {
+  return !isObj(entry) || entry.shouldTranslate === false || entry.substitutions !== undefined || xcstringsHasDeviceVariant(entry);
+}
+
+/** An entry's value for one locale: a plain string, a `{zero,one,...}` plural object, or undefined if untranslated. */
+function xcstringsValue(entry: Obj, tag: string): unknown {
+  const loc = (entry.localizations as Obj | undefined)?.[tag] as Obj | undefined;
+  if (!loc) return undefined;
+  const plural = (loc.variations as Obj | undefined)?.plural as Obj | undefined;
+  if (plural) {
+    const out = newObj();
+    for (const cat of CATEGORIES) {
+      const v = ((plural[cat] as Obj | undefined)?.stringUnit as Obj | undefined)?.value;
+      if (typeof v === "string") out[cat] = v;
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
+  const v = (loc.stringUnit as Obj | undefined)?.value;
+  return typeof v === "string" ? v : undefined;
+}
+
+/**
+ * Apple's `.xcstrings` String Catalog (Xcode 15+'s default, replacing `.strings`):
+ * unlike every other format here, ALL locales — source included — live in ONE JSON
+ * file, keyed by the string's own identifier under `strings`. Each entry's
+ * `localizations.<tag>` holds either a plain `stringUnit` or, for a plural string, a
+ * `variations.plural` object whose zero/one/two/few/many/other categories are exactly
+ * the shape `addNestedPluralForms` already understands (see Android/Rails), so it's
+ * reused unchanged. An entry with no `localizations.<sourceLanguage>` at all falls
+ * back to its own key as the source text, matching Xcode's own convention for a
+ * string that was never given explicit source content.
+ *
+ * `shouldTranslate: false`, Xcode's per-device variants (`variations.iphone`/`.ipad`),
+ * and multi-variable strings (`substitutions`, used with `%#@name@`-style format
+ * references) are all left completely untouched rather than mistranslated — a bigger
+ * matrix than a single cardinal plural isn't supported yet.
+ *
+ * `targetFile`/`sourceFiles` point every locale at this same one file, so each
+ * locale's turn re-reads it fresh (via `existingText`) before writing — the same
+ * read-then-write-fresh sequencing the CLI already does per locale, which is what
+ * lets several locales share one file safely in a single run without clobbering each
+ * other. A key's translated value is only ever replaced, never its `state`/metadata,
+ * when the value hasn't actually changed — so a translator's own "needs_review" flag
+ * on an untouched entry survives a rerun.
+ */
+function readXcstringsDoc(file: string, text: string, tag: string, isSource: boolean): LocaleDoc {
+  let raw: Obj;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`Invalid .xcstrings (JSON) in ${file}: ${(e as Error).message}`);
+  }
+  const strings = isObj(raw.strings) ? (raw.strings as Obj) : {};
+  const data = newObj();
+  for (const key of Object.keys(strings)) {
+    const entry = strings[key];
+    if (xcstringsSkip(entry)) continue;
+    const v = xcstringsValue(entry as Obj, tag);
+    if (v !== undefined) data[key] = v;
+    else if (isSource) data[key] = key;
+  }
+  const indent = /^\{\r?\n([ \t]+)/.exec(text)?.[1] ?? 2;
+  const keepNewline = finalNewline(text);
+
+  const serialize = (d: unknown, targetTag: string, existingText?: string): string => {
+    const obj = isObj(d) ? d : newObj();
+    let out: Obj = raw;
+    if (existingText !== undefined) {
+      try {
+        out = JSON.parse(existingText);
+      } catch {
+        out = raw;
+      }
+    }
+    const outStrings = isObj(out.strings) ? (out.strings as Obj) : (out.strings = newObj());
+    for (const key of Object.keys(obj)) {
+      const entry = outStrings[key];
+      if (xcstringsSkip(entry)) continue;
+      const newVal = obj[key];
+      const curVal = xcstringsValue(entry as Obj, targetTag);
+      if (JSON.stringify(curVal) === JSON.stringify(newVal)) continue;
+      const locs = isObj((entry as Obj).localizations) ? ((entry as Obj).localizations as Obj) : ((entry as Obj).localizations = newObj());
+      if (isObj(newVal)) {
+        const plural = newObj();
+        for (const cat of CATEGORIES) {
+          if (typeof (newVal as Obj)[cat] === "string") {
+            plural[cat] = { stringUnit: { state: "translated", value: (newVal as Obj)[cat] } };
+          }
+        }
+        locs[targetTag] = { variations: { plural } };
+      } else if (typeof newVal === "string") {
+        locs[targetTag] = { stringUnit: { state: "translated", value: newVal } };
+      }
+    }
+    return withNewline(JSON.stringify(out, null, indent), keepNewline);
+  };
+  return { data, serialize };
+}
+
 /**
  * gettext .po: `msgid` is the stable key (kept identical across locales, as gettext
  * requires); the translatable value is `msgstr`. Plural entries (`msgid_plural` /
@@ -778,6 +923,7 @@ export function readLocaleDoc(file: string, tag: string, isSource = false, fuzzy
   if (ext === ".arb") return readArbDoc(file, text);
   if (ext === ".strings") return readStringsDoc(file, text);
   if (ext === ".xml") return readAndroidXmlDoc(file, text);
+  if (ext === ".xcstrings") return readXcstringsDoc(file, text, tag, isSource);
   return readJsonDoc(file, text);
 }
 

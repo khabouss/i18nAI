@@ -420,6 +420,112 @@ test("Android strings.xml: strings, arrays, plurals, translatable=false and esca
   assert.deepEqual(Object.keys(withMissing.doc as Record<string, unknown>).includes("item_count"), true);
 });
 
+test("Apple .xcstrings: source extraction skips shouldTranslate=false/device variants, falls back to the key itself", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xcstrings-"));
+  const file = path.join(dir, "Localizable.xcstrings");
+  const catalog = {
+    sourceLanguage: "en",
+    strings: {
+      Settings: { localizations: { en: { stringUnit: { state: "translated", value: "Settings" } } } },
+      "App Bundle ID": { shouldTranslate: false, localizations: { en: { stringUnit: { state: "translated", value: "com.acme.app" } } } },
+      "%lld items": {
+        localizations: {
+          en: {
+            variations: {
+              plural: {
+                one: { stringUnit: { state: "translated", value: "%lld item" } },
+                other: { stringUnit: { state: "translated", value: "%lld items" } },
+              },
+            },
+          },
+        },
+      },
+      "Device thing": { localizations: { en: { variations: { device: { iphone: { stringUnit: { state: "translated", value: "Phone" } } } } } } },
+      Cancel: {},
+    },
+    version: "1.0",
+  };
+  fs.writeFileSync(file, JSON.stringify(catalog, null, 2));
+
+  const layout = detectLayout(dir, "en", file);
+  assert.deepEqual(layout, { kind: "xcstrings", root: dir, file });
+  assert.deepEqual(sourceFiles(layout, "en"), [file]);
+  assert.equal(targetFile(layout, "en", "fr", file), file);
+  assert.throws(() => detectLayout(dir, "de", file), /sourceLanguage "en", not "de"/);
+
+  const doc = readLocaleDoc(file, "en", true);
+  assert.equal(
+    JSON.stringify(doc.data),
+    JSON.stringify({
+      Settings: "Settings",
+      "%lld items": { one: "%lld item", other: "%lld items" },
+      Cancel: "Cancel",
+    }),
+  );
+});
+
+test("Apple .xcstrings: translating several locales in one run shares the file without clobbering each other or untouched state", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-xcstrings-"));
+  const file = path.join(dir, "Localizable.xcstrings");
+  const catalog = {
+    sourceLanguage: "en",
+    strings: {
+      Settings: { localizations: { en: { stringUnit: { state: "translated", value: "Settings" } } } },
+      "%lld items": {
+        localizations: {
+          en: {
+            variations: {
+              plural: {
+                one: { stringUnit: { state: "translated", value: "%lld item" } },
+                other: { stringUnit: { state: "translated", value: "%lld items" } },
+              },
+            },
+          },
+        },
+      },
+    },
+    version: "1.0",
+  };
+  fs.writeFileSync(file, JSON.stringify(catalog, null, 2));
+  const layout = detectLayout(dir, "en", file);
+  const doc = readLocaleDoc(file, "en", true);
+
+  for (const [tag, marker] of [["fr", "FR"], ["ar", "AR"]] as const) {
+    const target = targetFile(layout, "en", tag, file);
+    const existing = fs.existsSync(target) ? readLocaleDoc(target, tag).data : undefined;
+    let built = buildTarget(doc.data, existing, (s) => `[${marker}] ${s}`, false);
+    built = addNestedPluralForms(built, tag).doc;
+    const before = fs.readFileSync(target, "utf8");
+    fs.writeFileSync(target, doc.serialize(built, tag, before));
+  }
+
+  const after = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(after.strings.Settings.localizations.fr.stringUnit.value, "[FR] Settings");
+  assert.equal(after.strings.Settings.localizations.ar.stringUnit.value, "[AR] Settings");
+  assert.equal(after.strings.Settings.localizations.en.stringUnit.value, "Settings");
+  // French only needs one/other/many; Arabic's 6 categories were all filled in by addNestedPluralForms.
+  assert.deepEqual(Object.keys(after.strings["%lld items"].localizations.fr.variations.plural).toSorted(), ["many", "one", "other"]);
+  assert.deepEqual(
+    Object.keys(after.strings["%lld items"].localizations.ar.variations.plural).toSorted(),
+    ["few", "many", "one", "other", "two", "zero"],
+  );
+  assert.deepEqual(existingTargets(layout, "en").toSorted(), ["ar", "fr"]);
+
+  // A no-op rerun for fr must not disturb a translator's own "needs_review" flag.
+  const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+  raw.strings.Settings.localizations.fr.stringUnit.state = "needs_review";
+  fs.writeFileSync(file, JSON.stringify(raw, null, 2));
+  const srcRerun = readLocaleDoc(file, "en", true);
+  const existingRerun = readLocaleDoc(file, "fr").data;
+  assert.deepEqual(pendingStrings(srcRerun.data, existingRerun, false), []);
+  let builtRerun = buildTarget(srcRerun.data, existingRerun, (s) => `[FR] ${s}`, false);
+  builtRerun = addNestedPluralForms(builtRerun, "fr").doc;
+  const beforeRerun = fs.readFileSync(file, "utf8");
+  fs.writeFileSync(file, srcRerun.serialize(builtRerun, "fr", beforeRerun));
+  const final = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(final.strings.Settings.localizations.fr.stringUnit.state, "needs_review");
+});
+
 test("flattenStrings: key paths for nested objects and arrays", () => {
   assert.deepEqual(flattenStrings({ a: "x", b: { c: "y" }, d: ["p", "q"] }), [
     { path: "a", value: "x" },
