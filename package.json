@@ -1,6 +1,6 @@
 {
   "name": "locale-ai",
-  "version": "0.7.9",
+  "version": "0.7.10",
   "description": "Translate your i18n locale files locally on CPU. Free, offline, no API keys.",
   "author": "Taha KHABOUSS",
   "repository": {
@@ -14,6 +14,14 @@
   "type": "module",
   "bin": {
     "locale-ai": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "files": [
     "dist",

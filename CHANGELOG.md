@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.10
+
+Three editorial/feature items, not bugs ([khabouss/locale-ai#14](https://github.com/khabouss/locale-ai/issues/14)):
+
+- **`src/locales.ts` (2041 lines) is now split into `src/formats/`**, one module per file format (JSON/YAML, Apple `.strings`, Java `.properties`, Android `strings.xml`, XLIFF, `.resx`, JS/TS modules, ARB, `.xcstrings`, gettext `.po`), plus a shared module for the primitives every reader uses (the `LocaleDoc` shape, trailing-newline bookkeeping, CLDR plural categories, C-style and generic-XML escaping). `locales.ts` itself is now layout detection, the `readLocaleDoc` dispatcher, and the core flatten/build/plural-sync logic — a pure mechanical move, re-exporting the same symbols with identical behavior.
+- **Added a programmatic (non-CLI) library API.** `import { translate, check } from "locale-ai"` runs the same pipeline `locale-ai translate`/`locale-ai check` do, as plain async functions returning structured results instead of printing — for a build script or test that wants to drive it in-process rather than shelling out. Unlike the CLI, it never prompts: a model download either proceeds (`yes: true`, or a `confirmDownload` hook) or the call rejects; an `onEvent` hook reports the same progress/status information the CLI renders as bars and log lines. `src/cli.ts` is now a thin wrapper around this same API, so the two can't drift apart. See the README's new "Library API" section.
+- **README fixes**: the `## Commands` section was missing the `accept` command entirely (despite being referenced elsewhere in the README) and the `--fuzzy`/`--config` flags on `translate`/`check`; both are now listed. Fixed a "commiting" → "committing" typo.
+
 ## 0.7.9
 
 Four more gaps from the same external review, verified with reproductions before fixing ([khabouss/locale-ai#12](https://github.com/khabouss/locale-ai/issues/12)):
