@@ -39,6 +39,21 @@ function rm(p) {
   }
 }
 
+/**
+ * True when `onnxRoot` was resolved into a pnpm virtual store (`node_modules/.pnpm/
+ * onnxruntime-node@<version>/node_modules/onnxruntime-node`) rather than a real project
+ * `node_modules`. Node follows symlinks by default, so `require.resolve` lands there
+ * directly; scanning that directory for siblings is useless — it only ever contains
+ * `onnxruntime-node` itself, so a real consumer symlinked into the project's actual
+ * top-level `node_modules` (pnpm's usual layout) is invisible to `hasOtherConsumer`.
+ * Reliably walking pnpm's own dependency graph instead isn't worth the fragility this
+ * best-effort script is trying to avoid, so this is treated the same as
+ * LOCALE_AI_SKIP_TRIM: skip trimming rather than risk a false "no other consumer".
+ */
+function isPnpmVirtualStore(onnxRoot) {
+  return onnxRoot.split(path.sep).includes(".pnpm");
+}
+
 /** Any OTHER package in `nodeModulesDir` that itself depends on onnxruntime-node. */
 function hasOtherConsumer(nodeModulesDir) {
   let entries;
@@ -68,14 +83,34 @@ function hasOtherConsumer(nodeModulesDir) {
   return false;
 }
 
+/**
+ * True when the project that `nodeModulesDir` belongs to (one level up) directly depends
+ * on onnxruntime-node itself — e.g. for its own GPU use, independent of locale-ai's. Unlike
+ * `hasOtherConsumer`, which only looks at sibling packages *inside* node_modules, nothing
+ * else scans the root manifest, so this consumer would otherwise go undetected. Excluded
+ * when the root itself IS locale-ai (this repo's own checkout, where the root manifest's
+ * own onnxruntime-node dependency is exactly the one this script exists to trim).
+ */
+function rootDependsOnOnnx(nodeModulesDir) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(path.dirname(nodeModulesDir), 'package.json'), 'utf8'));
+    if (pkg.name === 'locale-ai') return false;
+    const deps = { ...pkg.dependencies, ...pkg.optionalDependencies, ...pkg.peerDependencies, ...pkg.devDependencies };
+    return !!(deps && 'onnxruntime-node' in deps);
+  } catch {
+    return false;
+  }
+}
+
 function trim() {
   if (process.env.LOCALE_AI_SKIP_TRIM) return;
 
   try {
     const pkgJson = require.resolve('onnxruntime-node/package.json');
     const onnxRoot = path.dirname(pkgJson);
+    if (isPnpmVirtualStore(onnxRoot)) return;
     const nodeModulesDir = path.dirname(onnxRoot);
-    if (hasOtherConsumer(nodeModulesDir)) return;
+    if (hasOtherConsumer(nodeModulesDir) || rootDependsOnOnnx(nodeModulesDir)) return;
 
     const binRoot = path.join(onnxRoot, 'bin', 'napi-v6');
     if (!fs.existsSync(binRoot)) return;
@@ -106,6 +141,6 @@ function trim() {
   }
 }
 
-module.exports = { trim };
+module.exports = { trim, hasOtherConsumer, rootDependsOnOnnx, isPnpmVirtualStore };
 
 if (require.main === module) trim();
