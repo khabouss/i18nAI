@@ -37,6 +37,36 @@ function setLeaves(doc: Document, base: Array<string | number>, v: unknown): voi
 }
 
 /**
+ * `YAMLMap#set` (called by `Document#setIn`, above, for a path that doesn't exist
+ * yet) always appends a brand-new pair at the end of its parent map — so a derived
+ * plural form like `item_many`, added next to `item_one`/`item_other` in `v` itself,
+ * would otherwise land at the very end of the whole mapping instead. Reorders each
+ * map's items to match `v`'s own key order, the same position a map built fresh
+ * from `v` would already have them in.
+ */
+function reorderToMatch(doc: Document, base: Array<string | number>, v: unknown): void {
+  if (Array.isArray(v)) {
+    v.forEach((item, i) => reorderToMatch(doc, [...base, i], item));
+    return;
+  }
+  if (!isObj(v)) return;
+  const node = doc.getIn(base);
+  if (isMap(node)) {
+    const order = Object.keys(v);
+    const rank = (pair: { key: unknown }) => {
+      // A pre-existing pair's key is a Scalar node; one `setIn` just created for a
+      // brand-new key (exactly the case this function exists to fix) is still the
+      // plain string/number itself, not yet wrapped in one.
+      const k = isScalar(pair.key) ? pair.key.value : pair.key;
+      const i = typeof k === "string" ? order.indexOf(k) : -1;
+      return i < 0 ? order.length : i; // a key `v` doesn't have (never removed here) sorts last, stable among itself
+    };
+    node.items.sort((a, b) => rank(a) - rank(b));
+  }
+  for (const [k, val] of Object.entries(v)) reorderToMatch(doc, [...base, k], val);
+}
+
+/**
  * Rails and some other frameworks nest an entire YAML locale file under a single
  * top-level key matching the locale tag itself (`en:\n  hello: Hi`), so the file is
  * valid wherever it's loaded from. Detect that wrapper and unwrap it before handing
@@ -75,6 +105,7 @@ export function readYamlDoc(file: string, text: string, tag: string): LocaleDoc 
     base ??= srcDoc.clone();
     if (wrapped) rewrapKey(base, targetTag);
     setLeaves(base, wrapped ? [targetTag] : [], d);
+    reorderToMatch(base, wrapped ? [targetTag] : [], d);
     return withNewline(base.toString({ indent }), keepNewline);
   };
   return { data, serialize };

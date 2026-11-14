@@ -81,6 +81,7 @@ export class MarianModel {
   private readonly targetPieces: string[];
   private readonly cfg: Config;
   private readonly special: Set<number>;
+  private readonly unkId: number | undefined;
 
   private constructor(
     encoderSession: ort.InferenceSession,
@@ -91,6 +92,7 @@ export class MarianModel {
     targetPieces: string[],
     cfg: Config,
     special: Set<number>,
+    unkId: number | undefined,
   ) {
     this.encoderSession = encoderSession;
     this.decoderSession = decoderSession;
@@ -100,6 +102,7 @@ export class MarianModel {
     this.targetPieces = targetPieces;
     this.cfg = cfg;
     this.special = special;
+    this.unkId = unkId;
   }
 
   static async load(paths: MarianPaths, threads?: number): Promise<MarianModel> {
@@ -131,7 +134,7 @@ export class MarianModel {
       const id = targetVocab.get(tok);
       if (id !== undefined) special.add(id);
     }
-    return new MarianModel(enc, dec, topk, sp, vocab, targetPieces, cfg, special);
+    return new MarianModel(enc, dec, topk, sp, vocab, targetPieces, cfg, special, targetVocab.get("<unk>"));
   }
 
   /** True when the model knows this ">>xx<<" target-language token. */
@@ -166,6 +169,7 @@ export class MarianModel {
     const k = Math.max(1, opts.beams);
     const lp = opts.lengthPenalty ?? 1;
     const { pad_token_id: pad, eos_token_id: eos, decoder_start_token_id: start } = this.cfg;
+    const unk = this.unkId;
     const B = inputs.length;
     const S = Math.max(...inputs.map((x) => x.length));
 
@@ -230,10 +234,15 @@ export class MarianModel {
       const V = out.logits.dims[2];
       const seqLen = out.logits.dims[1];
 
-      // Never generate <pad> (HF bad_words_ids).
+      // Never generate <pad> (HF bad_words_ids) or <unk> — the vocab lacking a piece
+      // (e.g. an uppercase accented letter) is otherwise silently dropped by decodeIds,
+      // losing a character rather than steering the beam to a real word.
       const rowsStride = seqLen * V;
       const last = (seqLen - 1) * V;
-      for (let r = 0; r < R; r++) logits[r * rowsStride + last + pad] = -Infinity;
+      for (let r = 0; r < R; r++) {
+        logits[r * rowsStride + last + pad] = -Infinity;
+        if (unk !== undefined) logits[r * rowsStride + last + unk] = -Infinity;
+      }
 
       // Beam search: log_softmax + top-k per row runs natively in onnxruntime.
       const want = k === 1 ? 1 : 2 * k;

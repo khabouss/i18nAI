@@ -337,6 +337,45 @@ async function fixSingularGrammar(
   }
 }
 
+const HASH_PLACEHOLDER = "{__HASH__}";
+
+/**
+ * The ICU-plural analogue of `fixSingularGrammar`, above: a `plural` argument's
+ * "one" option body ("# file") is grammatically singular, but the masked
+ * `{__HASH__}` standing in for `#` carries no number of its own, so the model can
+ * still produce the target's plural noun there too (confirmed: en→fr "one {# file}"
+ * kept the French plural "fichiers" rather than the singular "fichier"). Retranslating
+ * with a literal "1" in {__HASH__}'s place gives the model the same real grammatical
+ * cue `fixSingularGrammar` already supplies for an i18next "_one" key.
+ */
+async function fixIcuOneUnits(
+  plans: Array<{ oneUnitIndexes: number[]; units: Unit[] }>,
+  hops: Translator[],
+  opts: EngineOptions,
+  progress: Progress,
+): Promise<void> {
+  const jobs: Array<{ unit: Unit; pinned: string; prepared: string }> = [];
+  for (const p of plans) {
+    for (const i of p.oneUnitIndexes) {
+      const unit = p.units[i];
+      const tokens = mask(unit.text, "natural").tokens;
+      if (tokens.length !== 1 || tokens[0] !== HASH_PLACEHOLDER) continue; // anything else needs the normal masking pipeline to survive
+      jobs.push({ unit, pinned: unit.text.replace(HASH_PLACEHOLDER, "1"), prepared: prepare(unit.text.replace(HASH_PLACEHOLDER, "1")) });
+    }
+  }
+  if (!jobs.length) return;
+  const outputs = await runModels(new Set(jobs.map((j) => j.prepared)), hops, opts, progress);
+  for (const { unit, pinned, prepared } of jobs) {
+    const out = outputs.get(prepared) ?? "";
+    if (isDegenerate(pinned, out)) continue;
+    const post = postprocess(pinned, out, opts.targetLang);
+    const matches = [...post.matchAll(/(?<![\d.])1(?![\d.])/g)];
+    if (matches.length !== 1) continue; // no match, or ambiguous: keep the original translation
+    const restored = matches[0];
+    unit.result = post.slice(0, restored.index) + HASH_PLACEHOLDER + post.slice(restored.index! + 1);
+  }
+}
+
 export async function translateStrings(
   strings: string[],
   hops: Translator[],
@@ -354,8 +393,14 @@ export async function translateStrings(
   }
 
   const plans = remaining.map((s) => {
-    const split = extractIcu(s) ?? extractPipePlural(s);
-    return { source: s, split, units: (split?.units ?? [s]).map((text): Unit => ({ text, owner: s })) };
+    const icu = extractIcu(s);
+    const split = icu ?? extractPipePlural(s);
+    return {
+      source: s,
+      split,
+      oneUnitIndexes: icu?.oneUnitIndexes ?? [],
+      units: (split?.units ?? [s]).map((text): Unit => ({ text, owner: s })),
+    };
   });
   const units = plans.flatMap((p) => p.units);
 
@@ -364,6 +409,7 @@ export async function translateStrings(
     if (pending.length) pending = await attempt(pending, style, hops, opts, progress, issues);
   }
   if (pending.length) await splitFallback(pending, hops, opts, progress, issues);
+  if (plans.some((p) => p.oneUnitIndexes.length)) await fixIcuOneUnits(plans, hops, opts, progress);
 
   for (const p of plans) {
     const parts = p.units.map((u) => u.result ?? u.text);

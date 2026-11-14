@@ -43,6 +43,11 @@ test("translates the fixture app to French", { skip: !process.env.LOCALE_AI_E2E,
   // Multi-sentence strings keep every sentence, multiline keeps the newline.
   assert.match(fr.actions.retry, /échoué\. .*réessayer/);
   assert.equal(fr.multiline.split("\n").length, 2);
+  // Regression for the <unk>-dropping bug (src/marian.ts): the vocab has no
+  // uppercase Ê, so without blocking <unk> at generation time this came back
+  // "Tes-vous sûr..." — a dropped letter steered the beam to a different word
+  // entirely, not just a missing character in the right one.
+  assert.match(fr.actions.confirmDelete, /^Voulez-vous/);
   // Glossary, casing, untranslatable strings.
   assert.equal(auth.login.submit, "Se connecter");
   assert.equal(fr.actions.cta, fr.actions.cta.toUpperCase());

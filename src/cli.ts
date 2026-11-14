@@ -6,21 +6,11 @@ import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import {
-  CATALOG,
-  customEntries,
-  findById,
-  reachableTargets,
-  resolveRoute,
-  type Hop,
-  type ModelEntry,
-} from "./catalog.ts";
-import { check, translate } from "./api.ts";
-import { CONFIG_FILE, loadConfig, type ProjectConfig } from "./glossary.ts";
+import { findById, reachableTargets, resolveRoute, type ModelEntry } from "./catalog.ts";
+import { accept, check, ensureInstalled, fullCatalog, translate, type DownloadPlan, type TranslateEvent } from "./api.ts";
+import { CONFIG_FILE, loadConfig } from "./glossary.ts";
 import { parseLocale } from "./lang.ts";
-import { isEdited, LOCK_FILENAME, loadLock, recordEntries, saveLock } from "./lock.ts";
-import { detectLayout, existingTargets, flattenStrings, readLocaleDoc, sourceFiles, targetFile } from "./locales.ts";
-import { cacheRoot, install, isInstalled, localModelProblem, planInstall, readManifest, uninstall, type InstallPlan } from "./models.ts";
+import { cacheRoot, isInstalled, readManifest, uninstall } from "./models.ts";
 
 /** Read from package.json so `npm version` is the single source of truth. */
 const VERSION: string = JSON.parse(
@@ -141,25 +131,30 @@ async function confirm(question: string, yes: boolean): Promise<boolean> {
   return answer === "" || answer === "y" || answer === "yes";
 }
 
-async function ensureInstalled(models: ModelEntry[], yes: boolean): Promise<void> {
-  for (const m of new Set(models)) {
-    const problem = localModelProblem(m);
-    if (problem) throw new Error(`Model ${m.id}: ${problem}`);
-  }
-  const missing = [...new Set(models)].filter((m) => !m.path && !isInstalled(m));
-  if (!missing.length) return;
-  status("Checking model sizes...");
-  const plans: InstallPlan[] = [];
-  for (const m of missing) plans.push(await planInstall(m));
-  endStatus();
-  const total = plans.reduce((s, p) => s + p.bytes, 0);
+/** The `confirmDownload` hook `ensureInstalled` (src/api.ts) takes when `--yes` wasn't passed. */
+async function confirmDownloadPrompt(plans: DownloadPlan[], totalBytes: number): Promise<boolean> {
   log("Models to download (one time, then cached for every project):");
-  for (const p of plans) log(`  ${p.model.id.padEnd(12)} ${mb(p.bytes).padStart(7)}  ${p.model.repo ?? p.model.path}`);
-  if (!(await confirm(`Download ${mb(total)}?`, yes))) throw new Error("Download declined.");
-  for (const p of plans) {
-    await install(p, makeProgress((d, t) => `Downloading ${p.model.id} ${bar(d, t)} ${mb(d)}/${mb(t)}`));
-    endStatus();
-    log(`✓ Installed ${p.model.id}`);
+  for (const p of plans) log(`  ${p.modelId.padEnd(12)} ${mb(p.bytes).padStart(7)}  ${p.source}`);
+  if (!(await confirm(`Download ${mb(totalBytes)}?`, false))) throw new Error("Download declined.");
+  return true;
+}
+
+/** Renders the download-related subset of events `ensureInstalled` (src/api.ts) emits. */
+function onDownloadEvent(e: TranslateEvent): void {
+  switch (e.type) {
+    case "checking-models":
+      status("Checking model sizes...");
+      break;
+    case "download-plan":
+      endStatus();
+      break;
+    case "download-progress":
+      status(`Downloading ${e.modelId} ${bar(e.done, e.total)} ${mb(e.done)}/${mb(e.total)}`);
+      break;
+    case "download-done":
+      endStatus();
+      log(`✓ Installed ${e.modelId}`);
+      break;
   }
 }
 
@@ -206,12 +201,7 @@ async function cmdTranslate(argv: string[]): Promise<number> {
     fuzzy: values.fuzzy,
     config: values.config,
     yes: values.yes,
-    confirmDownload: async (plans, totalBytes) => {
-      log("Models to download (one time, then cached for every project):");
-      for (const p of plans) log(`  ${p.modelId.padEnd(12)} ${mb(p.bytes).padStart(7)}  ${p.source}`);
-      if (!(await confirm(`Download ${mb(totalBytes)}?`, false))) throw new Error("Download declined.");
-      return true;
-    },
+    confirmDownload: confirmDownloadPrompt,
     onEvent: (e) => {
       switch (e.type) {
         case "found":
@@ -233,17 +223,10 @@ async function cmdTranslate(argv: string[]): Promise<number> {
           break;
         }
         case "checking-models":
-          status("Checking model sizes...");
-          break;
         case "download-plan":
-          endStatus();
-          break;
         case "download-progress":
-          status(`Downloading ${e.modelId} ${bar(e.done, e.total)} ${mb(e.done)}/${mb(e.total)}`);
-          break;
         case "download-done":
-          endStatus();
-          log(`✓ Installed ${e.modelId}`);
+          onDownloadEvent(e);
           break;
         case "loading-model":
           status(`${e.locale}: loading ${e.modelId}...`);
@@ -319,11 +302,6 @@ function convertModel(
   return 0;
 }
 
-/** Built-in models plus the project's own (which take priority). */
-function catalogFor(config: ProjectConfig): ModelEntry[] {
-  return [...customEntries(config.models, config.dir ?? process.cwd()), ...CATALOG];
-}
-
 async function cmdModels(argv: string[]): Promise<number> {
   const [sub, ...rest] = argv;
   const { values, positionals } = parseArgs({
@@ -339,7 +317,7 @@ async function cmdModels(argv: string[]): Promise<number> {
       yes: { type: "boolean", short: "y", default: false },
     },
   });
-  const catalog = catalogFor(loadConfig(process.cwd(), values.config));
+  const catalog = fullCatalog(loadConfig(process.cwd(), values.config), process.cwd());
   switch (sub) {
     case "list": {
       const filter = values.from ? parseLocale(values.from).lang : undefined;
@@ -370,7 +348,7 @@ async function cmdModels(argv: string[]): Promise<number> {
       }
       const already = models.filter(isInstalled);
       already.forEach((m) => log(`✓ ${m.id} already installed`));
-      await ensureInstalled(models, values.yes!);
+      await ensureInstalled(models, { yes: values.yes!, confirmDownload: confirmDownloadPrompt, onEvent: onDownloadEvent });
       return 0;
     }
     case "remove": {
@@ -434,18 +412,7 @@ async function cmdCheck(argv: string[]): Promise<number> {
   return result.ok ? 0 : 1;
 }
 
-/**
- * Approves the current on-disk target text as this tool's own, so a future
- * `translate`/`check` run stops reporting it under the "edited" issue kind.
- * With explicit keys, those keys are accepted unconditionally (an explicit
- * ask always wins). With no keys given, only paths the lock currently flags
- * as edited are accepted — NOT every key the target and source share, which
- * would also silently accept a genuinely outdated (source changed since
- * translated) entry nobody reviewed, defeating `check`'s staleness check.
- * The file on disk is never touched; only the lock's record of what this
- * tool last wrote there is advanced to match, the same as if it had just
- * (re)written that exact text itself.
- */
+/** Thin CLI wrapper around `accept()` (src/api.ts): parses argv, prints the summary. */
 async function cmdAccept(argv: string[]): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -457,44 +424,22 @@ async function cmdAccept(argv: string[]): Promise<number> {
       config: { type: "string" },
     },
   });
-  const from = parseLocale(values.from!);
-  const config = loadConfig(process.cwd(), values.config);
-  const layout = detectLayout(process.cwd(), from.tag, values.input);
-  const lockDir = config.configFile ? path.dirname(config.configFile) : layout.root;
-  const lockPath = path.resolve(lockDir, LOCK_FILENAME);
-  const lock = loadLock(lockPath);
-  const tags = values.to ? values.to.split(",").map((t) => parseLocale(t.trim()).tag) : existingTargets(layout, from.tag);
-  if (!tags.length) {
-    log(`No translated locales found next to ${from.tag}.`);
+  const result = await accept({
+    cwd: process.cwd(),
+    from: values.from,
+    to: values.to,
+    input: values.input,
+    config: values.config,
+    keys: positionals,
+  });
+  if (!result.locales.length) {
+    log(`No translated locales found next to ${parseLocale(values.from!).tag}.`);
     return 0;
   }
-  const wanted = positionals.length ? new Set(positionals) : undefined;
-  const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag, true) }));
-
-  let accepted = 0;
-  for (const to of tags) {
-    for (const { file, doc } of sources) {
-      const target = targetFile(layout, from.tag, to, file);
-      if (!fs.existsSync(target)) continue;
-      const lockKey = fileKey(file, lockDir);
-      const srcByPath = new Map(flattenStrings(doc.data).map((e) => [e.path, e.value]));
-      // A plural-derived path (e.g. "item_few") has no source counterpart at all — the
-      // same self-referential source==written convention `translate` records it with
-      // (see cmdTranslate) is used here too, so accepting one of these actually clears
-      // its "conflict"/"edited" status instead of silently matching nothing.
-      const entries = flattenStrings(readLocaleDoc(target, to).data)
-        .filter((e) => (wanted ? wanted.has(e.path) : isEdited(lock, lockKey, e.path, to, e.value)))
-        .map((e) => ({ path: e.path, source: srcByPath.get(e.path) ?? e.value, written: e.value }));
-      if (!entries.length) continue;
-      recordEntries(lock, lockKey, to, entries);
-      accepted += entries.length;
-    }
-  }
-  saveLock(lockPath, lock);
   log(
-    accepted
-      ? `✓ Accepted ${accepted} key${accepted === 1 ? "" : "s"} across ${tags.length} locale${tags.length === 1 ? "" : "s"} — \`check\`/\`translate\` won't flag ${accepted === 1 ? "it" : "them"} as edited again.`
-      : `No matching key${wanted && wanted.size === 1 ? "" : "s"} found to accept.`,
+    result.accepted
+      ? `✓ Accepted ${result.accepted} key${result.accepted === 1 ? "" : "s"} across ${result.locales.length} locale${result.locales.length === 1 ? "" : "s"} — \`check\`/\`translate\` won't flag ${result.accepted === 1 ? "it" : "them"} as edited again.`
+      : `No matching key${positionals.length === 1 ? "" : "s"} found to accept.`,
   );
   return 0;
 }

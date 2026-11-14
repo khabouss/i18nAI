@@ -15,7 +15,7 @@ npx locale-ai translate --from en --to fr,es,de
 ```
 
 ```
-locale-ai 0.7.11
+locale-ai 0.7.14
 Found 3 en files in locales/en/
 Models to download (one time, then cached for every project):
   en-fr         345 MB  khabouss/opus-mt-tc-big-en-fr-onnx

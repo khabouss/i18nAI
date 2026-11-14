@@ -132,7 +132,10 @@ const CONNECT_TIMEOUT_MS = 30_000;
 
 function requestHeaders(): Record<string, string> {
   const headers: Record<string, string> = { "user-agent": "locale-ai" };
-  if (process.env.HF_TOKEN) headers.authorization = `Bearer ${process.env.HF_TOKEN}`;
+  // HF_TOKEN authenticates against huggingface.co's own API — never forward it to a
+  // custom HF_ENDPOINT (a self-hosted mirror on a restricted network), which could be
+  // any third party, not just the same trust boundary this token was issued for.
+  if (process.env.HF_TOKEN && HF.includes("huggingface.co")) headers.authorization = `Bearer ${process.env.HF_TOKEN}`;
   return headers;
 }
 
@@ -244,18 +247,27 @@ async function download(url: string, dest: string, file: RemoteFile, onBytes: (n
     await fsp.mkdir(path.dirname(dest), { recursive: true });
     const hash = newHash(file);
     const out = fs.createWriteStream(dest);
+    // A write-stream error (e.g. ENOSPC on a full disk) is otherwise an unhandled
+    // 'error' event: EventEmitter semantics crash the whole process with it, bypassing
+    // this function's own try/catch entirely. Capturing it here instead lets the loop
+    // below notice and raise it as an ordinary rejection, same as any other failure.
+    let streamErr: Error | undefined;
+    out.on("error", (err) => (streamErr = err));
     let written = 0;
     try {
       for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
+        if (streamErr) throw streamErr;
         resetStallTimer();
         hash.update(chunk);
         written += chunk.length;
         onBytes(chunk.length);
         if (!out.write(chunk)) await new Promise((r) => out.once("drain", r));
+        if (streamErr) throw streamErr;
       }
     } finally {
-      await new Promise<void>((resolve, reject) => out.end((err?: Error | null) => (err ? reject(err) : resolve())));
+      await new Promise<void>((resolve) => out.end(() => resolve()));
     }
+    if (streamErr) throw streamErr;
     if (written !== file.size || hash.digest("hex") !== (file.sha256 ?? file.gitSha1)) {
       throw new Error(`Checksum mismatch for ${file.path} (got ${written} bytes). Please retry.`);
     }
