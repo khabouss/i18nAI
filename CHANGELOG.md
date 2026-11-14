@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.11
+
+Five more confirmed bugs from the same external review, verified with reproductions before fixing ([khabouss/locale-ai#16](https://github.com/khabouss/locale-ai/issues/16)):
+
+- **French punctuation used a plain, breakable space, not a non-breaking one** — before `! ? ; :`, both in the engine's own post-processing and the built-in glossary's "forgot password?"/"Password:" entries, so the punctuation could wrap onto its own line, orphaned at the start of the next one. All three sites (plus a third, previously-unreported one — the glossary's own French ":"-spacing rule) now insert `U+00A0` instead, and the engine's regex now replaces an existing plain space too, not just fills in a missing one — the model itself often adds the plain space.
+- **Translating to `pt-BR` got the same Plural-Forms formula as `pt`** (European Portuguese, `n != 1`) instead of the gettext-conventional `n > 1` for Brazilian Portuguese, since the lookup had no distinct `pt-BR` entry and silently fell through to a generic fallback that happened to produce the same (wrong) formula. `pt-BR` now resolves correctly, ahead of the bare `pt` entry.
+- **The generic Plural-Forms fallback was structurally wrong for untabulated Slavic/Baltic languages** (Croatian, Serbian, Bosnian, Lithuanian, Slovenian) — it only matched literal `n==1`, `n==2`, etc., so a number like 21 (which should be singular) fell into the wrong, catch-all category. These five languages now have their own correct, well-established gettext formulas instead of relying on the generic fallback.
+- **`check` couldn't see inside a nested ICU plural/select** (`{count, plural, one {...} other {...}}`) at all — a dropped mandatory `other` category or unbalanced braces in a hand-edited translation passed every check silently, since the placeholder-comparison regex can't match across the inner `{...}` boundaries. `check` now parses the target's ICU structure directly and reports a new `icu-structure` issue when it doesn't parse.
+- **The lock file and target locale files were written with a single, non-atomic `fs.writeFileSync`** — a process killed mid-write could leave a truncated file, which the lock loader (since 0.7.7) then hard-fails on. Both now write to a temp file in the same directory and rename it into place, so a reader (or a re-run after being killed) never sees a partial write.
+
 ## 0.7.10
 
 Three editorial/feature items, not bugs ([khabouss/locale-ai#14](https://github.com/khabouss/locale-ai/issues/14)):

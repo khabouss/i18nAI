@@ -71,7 +71,7 @@ const TABLE: Record<string, [string, string, string, string, string, string, str
   "email":           ["E-mail",                      "Correo electrónico",           "E-Mail",                   "Email",                       "E-mail",                    "E-mail",                  "البريد الإلكتروني"],
   "password":        ["Mot de passe",                "Contraseña",                   "Passwort",                 "Password",                    "Senha",                     "Wachtwoord",              "كلمة المرور"],
   "username":        ["Nom d'utilisateur",           "Nombre de usuario",            "Benutzername",             "Nome utente",                 "Nome de usuário",           "Gebruikersnaam",          "اسم المستخدم"],
-  "forgot password?":["Mot de passe oublié ?",       "¿Olvidaste tu contraseña?",    "Passwort vergessen?",      "Password dimenticata?",       "Esqueceu a senha?",         "Wachtwoord vergeten?",    "هل نسيت كلمة المرور؟"],
+  "forgot password?":["Mot de passe oublié ?",   "¿Olvidaste tu contraseña?",    "Passwort vergessen?",      "Password dimenticata?",       "Esqueceu a senha?",         "Wachtwoord vergeten?",    "هل نسيت كلمة المرور؟"],
   "loading":         ["Chargement",                  "Cargando",                     "Wird geladen",             "Caricamento",                 "Carregando",                "Laden",                   "جارٍ التحميل"],
   "today":           ["Aujourd'hui",                 "Hoy",                          "Heute",                    "Oggi",                        "Hoje",                      "Vandaag",                 "اليوم"],
   "yesterday":       ["Hier",                        "Ayer",                         "Gestern",                  "Ieri",                        "Ontem",                     "Gisteren",                "أمس"],
@@ -177,8 +177,9 @@ export function glossaryLookup(
     const letters = core.replace(/[^\p{L}]/gu, "");
     if (letters.length > 1 && letters === letters.toUpperCase()) value = value.toLocaleUpperCase(target.lang);
     let t = tail;
-    // French puts a space before ":"; the term itself already handles "?".
-    if (target.lang === "fr" && /^:/.test(t.trim())) t = t.replace(/^\s*:/, " :");
+    // French puts a non-breaking space before ":" (so it can't wrap onto its own line);
+    // the term itself already handles "?".
+    if (target.lang === "fr" && /^:/.test(t.trim())) t = t.replace(/^\s*:/, " :");
     return lead + value + t;
   };
 }

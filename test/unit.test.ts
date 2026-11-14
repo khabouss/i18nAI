@@ -269,6 +269,16 @@ test("lock: an unparseable (e.g. merge-conflicted) lock file throws instead of b
   assert.deepEqual(loadLock(path.join(dir, "missing.lock.json")), { version: 3, entries: {} });
 });
 
+test("fs-atomic: writeFileAtomic replaces the target in one rename, leaving no temp file behind", async () => {
+  const { writeFileAtomic } = await import("../src/fs-atomic.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-atomic-"));
+  const file = path.join(dir, "out.txt");
+  fs.writeFileSync(file, "old");
+  writeFileAtomic(file, "new");
+  assert.equal(fs.readFileSync(file, "utf8"), "new");
+  assert.deepEqual(fs.readdirSync(dir), ["out.txt"], "no .out.txt.tmp-* left behind");
+});
+
 test("lock: a pre-0.7.0 (version 1) lock file is migrated in memory, never crashes a run", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-lock-v1-"));
   const file = path.join(dir, "locale-ai.lock.json");
@@ -1543,6 +1553,31 @@ test("gettext .po: Plural-Forms is computed per target language, and a hand-fixe
   assert.match(rerun, /Plural-Forms: nplurals=6; plural=\(n==0 \? 0 : 5\);/);
 });
 
+test("gettext .po: pt-BR gets its own Plural-Forms, distinct from pt, and Croatian gets the Slavic rule", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-po-plural-forms-"));
+  const file = path.join(root, "en.po");
+  fs.writeFileSync(
+    file,
+    ['msgid ""', 'msgstr "Language: \\nPlural-Forms: nplurals=2; plural=(n != 1);\\n"', "", 'msgid "greeting"', 'msgstr "Hello!"', ""].join(
+      "\n",
+    ),
+  );
+  const doc = readLocaleDoc(file, "en");
+  const built = { "\u0004greeting": "Olá!" };
+
+  // European Portuguese: 0 is also singular ("n != 1").
+  assert.match(doc.serialize(built, "pt"), /Plural-Forms: nplurals=2; plural=\(n != 1\);/);
+  // Brazilian Portuguese: only exactly 1 is singular ("n > 1") — a distinct formula, not
+  // the generic category-count fallback silently reusing "pt"'s own rule.
+  assert.match(doc.serialize(built, "pt-BR"), /Plural-Forms: nplurals=2; plural=\(n > 1\);/);
+  // Croatian: the "ends in 1, not 11" Slavic rule, not the generic one-bucket-per-literal-n
+  // fallback (which would wrongly bucket 21 as "other" instead of "one").
+  assert.match(
+    doc.serialize(built, "hr"),
+    /Plural-Forms: nplurals=3; plural=\(n%10==1 && n%100!=11 \? 0 : n%10>=2 && n%10<=4 && \(n%100<12 \|\| n%100>14\) \? 1 : 2\);/,
+  );
+});
+
 /** A fake model: uppercases words, keeps tokens, optionally drops one. */
 function fakeTranslator(fn: (s: string) => string): Translator {
   return { translate: async (texts) => texts.map(fn), dispose: async () => {} };
@@ -1575,7 +1610,7 @@ test("glossary: built-in UI terms, project overrides, casing and punctuation", a
   assert.equal(fr("Sign in"), "Se connecter");
   assert.equal(fr("SIGN IN"), "SE CONNECTER");
   assert.equal(fr("Loading…"), "Chargement…");
-  assert.equal(fr("Password:"), "Mot de passe :");
+  assert.equal(fr("Password:"), "Mot de passe :", "a non-breaking space, not a plain one, before the French colon");
   assert.equal(fr("Home"), "Page d'accueil", "project glossary wins");
   assert.equal(fr("Sign in to continue"), undefined, "whole strings only");
   assert.equal(glossaryLookup(en, parseLocale("pt-PT"), {})("Save"), undefined, "pt-BR terms not used for pt-PT");
@@ -1621,6 +1656,12 @@ test("engine: count stays before the noun, tag spacing restored", async () => {
   });
   assert.equal(translations.get("{n} file"), "{n} fichier");
   assert.equal(translations.get("Read the <b>terms</b>"), "Read the <b>terms</b>");
+});
+
+test("engine: French punctuation spacing uses a non-breaking space, not a plain one", async () => {
+  const tr = fakeTranslator((s) => (s === "Continue?" ? "Continuer?" : s));
+  const { translations } = await translateStrings(["Continue?"], [tr], { sourceLang: "en", targetLang: "fr", batchSize: 4 });
+  assert.equal(translations.get("Continue?"), "Continuer ?");
 });
 
 test("numeric markers: restore, reject collisions", async () => {

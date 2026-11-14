@@ -419,6 +419,8 @@ async function cmdCheck(argv: string[]): Promise<number> {
         log(
           `✗ ${loc.locale}: ${target} "${issue.path}" placeholders differ: source [${issue.sourcePlaceholders.join(", ")}], target [${issue.targetPlaceholders.join(", ")}]`,
         );
+      } else if (issue.kind === "icu-structure") {
+        log(`✗ ${loc.locale}: ${target} "${issue.path}" has a broken plural/select — missing "other" or unbalanced braces`);
       } else if (issue.kind === "stale") {
         log(`✗ ${loc.locale}: ${target} "${issue.path}" is stale — the ${fromTag} source changed since this was last translated`);
       } else {
