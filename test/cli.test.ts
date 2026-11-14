@@ -72,6 +72,22 @@ test("accept <key> still accepts that exact key unconditionally, even if it isn'
   assert.match(accept.output, /Accepted 1 key/);
 });
 
+test("check flags a target plural/select with a dropped \"other\" or unbalanced braces, not just a placeholder mismatch", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-cli-icu-"));
+  fs.mkdirSync(path.join(dir, "locales/en"), { recursive: true });
+  fs.mkdirSync(path.join(dir, "locales/fr"), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "locales/en/common.json"),
+    JSON.stringify({ files: "{count, plural, one {# file} other {# files}}" }, null, 2),
+  );
+  // A hand-edit dropped the mandatory "other" category.
+  fs.writeFileSync(path.join(dir, "locales/fr/common.json"), JSON.stringify({ files: "{count, plural, one {# fichier}}" }, null, 2));
+
+  const result = run(["check"], dir);
+  assert.notEqual(result.status, 0);
+  assert.match(result.output, /"files".*broken plural\/select/);
+});
+
 test("a merge-conflicted lockfile fails loudly instead of being silently wiped", () => {
   const dir = setupTranslatedProject();
   fs.writeFileSync(

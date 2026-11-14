@@ -32,11 +32,22 @@ const PLURAL_FORMS: Record<string, string> = {
   ms: "nplurals=1; plural=0;",
   fr: "nplurals=2; plural=(n > 1);",
   pt: "nplurals=2; plural=(n != 1);",
+  // Brazilian Portuguese: conventionally only n==1 is singular (unlike pt-PT's n!=1,
+  // which also treats 0 as singular) — must be looked up before the bare "pt" entry.
+  "pt-br": "nplurals=2; plural=(n > 1);",
   cs: "nplurals=3; plural=(n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2;",
   sk: "nplurals=3; plural=(n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2;",
   pl: "nplurals=3; plural=(n==1 ? 0 : n%10>=2 && n%10<=4 && (n%100<12 || n%100>14) ? 1 : 2);",
   ru: "nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<12 || n%100>14) ? 1 : 2);",
   uk: "nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<12 || n%100>14) ? 1 : 2);",
+  // Croatian, Serbian, Bosnian: same "Russian-type" rule as pl/ru/uk above.
+  hr: "nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<12 || n%100>14) ? 1 : 2);",
+  sr: "nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<12 || n%100>14) ? 1 : 2);",
+  bs: "nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<12 || n%100>14) ? 1 : 2);",
+  // Lithuanian: its own "ends in 1, not 11" rule (the %100 window differs from Slavic).
+  lt: "nplurals=3; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && (n%100<10 || n%100>=20) ? 1 : 2);",
+  // Slovenian: one/two/few/other by n%100, not n%10.
+  sl: "nplurals=4; plural=(n%100==1 ? 0 : n%100==2 ? 1 : n%100==3 || n%100==4 ? 2 : 3);",
   ro: "nplurals=3; plural=(n==1 ? 0 : (n==0 || (n%100 > 0 && n%100 < 20)) ? 1 : 2);",
   ar: "nplurals=6; plural=(n==0 ? 0 : n==1 ? 1 : n==2 ? 2 : n%100>=3 && n%100<=10 ? 3 : n%100>=11 && n%100<=99 ? 4 : 5);",
 };
@@ -48,11 +59,12 @@ const PLURAL_FORMS: Record<string, string> = {
  * gettext consumers when wrong.
  */
 function pluralFormsHeader(lang: string): string {
-  const known = PLURAL_FORMS[lang];
+  const norm = lang.toLowerCase().replace(/_/g, "-");
+  const known = PLURAL_FORMS[norm] ?? PLURAL_FORMS[norm.split("-")[0]];
   if (known) return known;
   let n: number;
   try {
-    n = new Intl.PluralRules(lang).resolvedOptions().pluralCategories.length;
+    n = new Intl.PluralRules(norm).resolvedOptions().pluralCategories.length;
   } catch {
     n = 2;
   }

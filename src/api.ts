@@ -11,7 +11,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { CATALOG, customEntries, reachableTargets, resolveRoute, type Hop, type ModelEntry } from "./catalog.ts";
 import { translateStrings, type Issue } from "./engine.ts";
+import { writeFileAtomic } from "./fs-atomic.ts";
 import { glossaryLookup, loadConfig, protectRegex, type ProjectConfig } from "./glossary.ts";
+import { extractIcu, isIcuComplex } from "./icu.ts";
 import { intlCode, parseLocale, type Locale } from "./lang.ts";
 import { editedPaths, isEdited, isSourceStale, LOCK_FILENAME, loadLock, pruneDeletedKeys, recordEntries, saveLock, type LockFile } from "./lock.ts";
 import {
@@ -361,7 +363,7 @@ export async function translate(opts: TranslateOptions): Promise<TranslateResult
       const text = f.doc.serialize(plural.doc, job.locale.tag, before);
       if (text !== before) {
         fs.mkdirSync(path.dirname(f.target), { recursive: true });
-        fs.writeFileSync(f.target, text);
+        writeFileAtomic(f.target, text);
         written++;
       }
       const outFlat = new Map(flattenStrings(plural.doc).map((e) => [e.path, e.value]));
@@ -407,6 +409,7 @@ export type CheckIssue =
   | { locale: string; kind: "missing-file"; target: string; missingCount: number }
   | { locale: string; kind: "missing-key"; target: string; path: string }
   | { locale: string; kind: "placeholder-mismatch"; target: string; path: string; sourcePlaceholders: string[]; targetPlaceholders: string[] }
+  | { locale: string; kind: "icu-structure"; target: string; path: string }
   | { locale: string; kind: "stale"; target: string; path: string }
   | { locale: string; kind: "identical"; target: string; path: string };
 
@@ -472,6 +475,15 @@ export async function check(opts: CheckOptions = {}): Promise<CheckResult> {
         if (tgtVal === undefined) {
           missing++;
           issues.push({ locale: to, kind: "missing-key", target, path: p });
+          continue;
+        }
+        // A nested ICU plural/select (`{count, plural, one {...} other {...}}`) isn't
+        // matched by the simple-placeholder regex at all, so the token comparison below
+        // would pass vacuously even with a dropped mandatory "other" or unbalanced
+        // braces — check its structure directly instead.
+        if (isIcuComplex(srcVal) && extractIcu(tgtVal) === undefined) {
+          mismatched++;
+          issues.push({ locale: to, kind: "icu-structure", target, path: p });
           continue;
         }
         const srcMasked = mask(srcVal, "natural");

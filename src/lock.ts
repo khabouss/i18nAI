@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { writeFileAtomic } from "./fs-atomic.ts";
 
 /**
  * Tracks, per source file, key path and TARGET LOCALE, the source string last
@@ -123,7 +124,7 @@ export function loadLock(file: string): LockFile {
 export function saveLock(file: string, lock: LockFile): void {
   const keys = Object.keys(lock.entries).sort();
   const body = keys.length ? keys.map((k) => `  ${JSON.stringify(k)}: ${JSON.stringify(lock.entries[k])}`).join(",\n") : "";
-  fs.writeFileSync(file, `{\n  "version": 3,\n  "entries": {\n${body}\n  }\n}\n`);
+  writeFileAtomic(file, `{\n  "version": 3,\n  "entries": {\n${body}\n  }\n}\n`);
 }
 
 /**

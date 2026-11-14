@@ -116,8 +116,11 @@ function postprocess(src: string, out: string, targetLang: string): string {
   if (src.endsWith("…") && r.endsWith("...")) r = r.slice(0, -3) + "…";
   if (/^zh\b/.test(targetLang)) r = fixCjk(r);
   if (/^fr\b/.test(targetLang)) {
-    // French typography: a space before ! ? ; : (the model is inconsistent about it).
-    r = r.replace(/(?<=[^\s!?;:])([!?;:])(?=\s|$)/g, " $1");
+    // French typography: a non-breaking space before ! ? ; : — the model is inconsistent
+    // about adding one at all, and when it does, it's a plain, breakable space, which
+    // lets the punctuation wrap onto its own line. [ \t]* replaces that plain space
+    // (not just fills in a missing one) with a single U+00A0.
+    r = r.replace(/(?<=[^\s!?;:])[ \t]*([!?;:])(?=\s|$)/g, " $1");
   }
   if (isAllCaps(src)) return mapOutsideTokens(r, (x) => x.toLocaleUpperCase(targetLang));
   // Keep the source's leading capital ("Save" -> "Enregistrer", not "enregistrer").
