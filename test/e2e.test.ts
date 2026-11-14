@@ -43,6 +43,11 @@ test("translates the fixture app to French", { skip: !process.env.LOCALE_AI_E2E,
   // Multi-sentence strings keep every sentence, multiline keeps the newline.
   assert.match(fr.actions.retry, /échoué\. .*réessayer/);
   assert.equal(fr.multiline.split("\n").length, 2);
+  // Regression for cross-sentence agreement lost by always translating sentence-by-
+  // sentence (src/engine.ts's whole-string-first attempt): "exportation" is feminine,
+  // so the second sentence's pronoun must agree with it as "Elle", not "Il" — only
+  // possible when both sentences are translated together, with shared context.
+  assert.match(fr.multiline, /^Votre exportation est prête\.\nElle /);
   // Regression for the <unk>-dropping bug (src/marian.ts): the vocab has no
   // uppercase Ê, so without blocking <unk> at generation time this came back
   // "Tes-vous sûr..." — a dropped letter steered the beam to a different word

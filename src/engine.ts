@@ -191,6 +191,9 @@ async function attempt(
     failed.push(...units.filter((u) => !numericStyleSafe(u.text)));
     units = units.filter((u) => numericStyleSafe(u.text));
   }
+  const suspicionKind = (src: string, o: string): IssueKind | undefined =>
+    o.length > 3 * src.length + 20 ? "suspicious-length" : /(\b\p{L}+\b)(?:\W+\1\b){3,}/u.test(o) ? "repetition" : undefined;
+
   const jobs = units.map((unit) => {
     const masked = mask(unit.text, style, opts.protect);
     const pieces = hasTranslatableText(masked.text)
@@ -198,18 +201,60 @@ async function attempt(
           p.translate && !hasTranslatableText(p.value) ? { translate: false, value: p.value } : p,
         )
       : [];
-    return { unit, masked, pieces };
+    const sentenceCount = pieces.filter((p) => p.translate).length;
+    // The source's own separators (newlines, surrounding whitespace) are kept and
+    // reinserted verbatim below rather than sent to the model — flatInput joins just
+    // the sentences themselves with a plain space, same as each is already sent on its
+    // own. isAllCaps is excluded: prepare()/postprocess() assume a single
+    // sentence-initial letter to re-case, which a multi-sentence ALL-CAPS string would break.
+    const flatInput = sentenceCount > 1 && !isAllCaps(masked.text) ? pieces.filter((p) => p.translate).map((p) => p.value).join(" ") : undefined;
+    return { unit, masked, pieces, sentenceCount, flatInput };
   });
 
   const inputs = new Set<string>();
-  for (const j of jobs) for (const p of j.pieces) if (p.translate) inputs.add(prepare(p.value));
+  for (const j of jobs) {
+    for (const p of j.pieces) if (p.translate) inputs.add(prepare(p.value));
+    // OPUS-MT sometimes silently drops a whole sentence from a multi-sentence input
+    // (see segment.ts), which is why each sentence is normally translated on its own —
+    // but that loses any agreement carried across sentences (a pronoun's gender from an
+    // earlier sentence's noun: "Your export is ready. It will be..." -> fr "Elle", not
+    // "Il", since "exportation" is feminine). Translate the whole text too, in the same
+    // batch, and prefer it below when it doesn't look like anything got dropped.
+    if (j.flatInput !== undefined) inputs.add(prepare(j.flatInput));
+  }
   const results = await runModels(inputs, hops, opts, progress);
 
-  for (const { unit, masked, pieces } of jobs) {
+  for (const { unit, masked, pieces, sentenceCount, flatInput } of jobs) {
     if (pieces.length === 0) {
       unit.result = unit.text; // nothing to translate: placeholders, numbers, punctuation
       continue;
     }
+
+    if (flatInput !== undefined) {
+      const wholeOut = results.get(prepare(flatInput)) ?? "";
+      if (!isDegenerate(flatInput, wholeOut) && suspicionKind(flatInput, wholeOut) === undefined) {
+        const wholePost = postprocess(flatInput, wholeOut, opts.targetLang);
+        // An exact sentence-count match is required, not just "enough": only then does
+        // the original separators/non-translatable pieces below zip back up unambiguously
+        // against the model's own sentence boundaries. Anything else (one merged away,
+        // one split in two) falls back to the per-sentence path instead of guessing.
+        const outSentences = splitSentences(wholePost, opts.targetLang)
+          .filter((p) => p.translate)
+          .map((p) => p.value);
+        if (outSentences.length === sentenceCount) {
+          let i = 0;
+          const joined = pieces
+            .map((p) => (p.translate ? outSentences[i++] : NO_SPACES.test(opts.targetLang) ? p.value.replace(/^[ \t]+$/, "") : p.value))
+            .join("");
+          const restored = unmask(joined, masked);
+          if (restored !== undefined) {
+            unit.result = fixTagSpacing(unit.text, restored, masked.tokens);
+            continue;
+          }
+        }
+      }
+    }
+
     let ok = true;
     const found: Issue[] = [];
     const parts = await Promise.all(
@@ -217,10 +262,8 @@ async function attempt(
         // No spaces between sentences in Chinese, Japanese, Thai...
         if (!p.translate) return NO_SPACES.test(opts.targetLang) ? p.value.replace(/^[ \t]+$/, "") : p.value;
         let out = results.get(prepare(p.value)) ?? "";
-        const suspicionKind = (o: string): IssueKind | undefined =>
-          o.length > 3 * p.value.length + 20 ? "suspicious-length" : /(\b\p{L}+\b)(?:\W+\1\b){3,}/u.test(o) ? "repetition" : undefined;
         let degenerate = isDegenerate(p.value, out);
-        let kind = degenerate ? undefined : suspicionKind(out);
+        let kind = degenerate ? undefined : suspicionKind(p.value, out);
         // Quantizing a batched tensor computes scale factors from the whole batch, so one
         // row's output can depend on what else shared its batch. Retrying the same input
         // alone (batch of 1) often clears a hallucination that batch composition caused.
@@ -228,7 +271,7 @@ async function attempt(
           const retry = await runModels(new Set([prepare(p.value)]), hops, opts, progress);
           const retryOut = retry.get(prepare(p.value)) ?? out;
           const retryDegenerate = isDegenerate(p.value, retryOut);
-          if (!retryDegenerate && suspicionKind(retryOut) === undefined) {
+          if (!retryDegenerate && suspicionKind(p.value, retryOut) === undefined) {
             out = retryOut;
             degenerate = false;
             kind = undefined;
