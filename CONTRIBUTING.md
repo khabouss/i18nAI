@@ -7,14 +7,16 @@ Thanks for considering a contribution to locale-ai.
 ```bash
 git clone https://github.com/khabouss/locale-ai.git
 cd locale-ai
-npm install
+ONNXRUNTIME_NODE_INSTALL=skip npm install
 ```
+
+locale-ai always runs `onnxruntime-node` with `executionProviders: ["cpu"]` (see `src/marian.ts`), so that env var skips its postinstall download of the ~260&nbsp;MB CUDA provider — same as the README recommends for an end-user install. CI sets it the same way.
 
 ## Development loop
 
 ```bash
 npm test            # unit tests (no models, fast)
-npm run test:e2e    # real models, downloads ~115 MB once
+npm run test:e2e    # real models, downloads ~345 MB once (en-fr, tc-big)
 npm run dev -- translate --to fr   # run from source
 npm run build       # compile to dist/
 npm run typecheck

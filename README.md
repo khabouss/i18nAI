@@ -15,7 +15,7 @@ npx locale-ai translate --from en --to fr,es,de
 ```
 
 ```
-locale-ai 0.6.3
+locale-ai 0.7.11
 Found 3 en files in locales/en/
 Models to download (one time, then cached for every project):
   en-fr         345 MB  khabouss/opus-mt-tc-big-en-fr-onnx
@@ -30,7 +30,7 @@ Download 577 MB? (Y/n)
 > ```bash
 > ONNXRUNTIME_NODE_INSTALL=skip npm install locale-ai
 > ```
-> That's also the faster way to install even with a good connection — about 51&nbsp;MB and 3 seconds instead of several hundred MB. locale-ai re-checks for (and removes) that CUDA provider on every run too, in case it slipped in anyway.
+> That's also the faster way to install even with a good connection — ~45&nbsp;MB and 3 seconds instead of several hundred MB. locale-ai re-checks for (and removes) that CUDA provider on every run too, in case it slipped in anyway.
 
 > **Seeing an `install-scripts` warning?** npm 11.20+ added an approval gate that silently skips `postinstall` scripts not yet on an allowlist — including both locale-ai's own CUDA-trim script above and `onnxruntime-node`'s own postinstall. This is expected and harmless: the CLI re-checks for (and removes) the unused CUDA provider on every run regardless, with or without that `postinstall` having run. Approve both explicitly to silence the warning, if you'd rather:
 > ```bash

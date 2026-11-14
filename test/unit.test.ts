@@ -1844,6 +1844,34 @@ test("modelDir: refuses to resolve outside the model cache even if an unsafe rep
   assert.equal(safe, path.join(cacheRoot(), "models/khabouss/opus-mt-tc-big-en-fr-onnx"));
 });
 
+test("cleanupStalePartials: removes a .partial-<pid> dir left by a killed process, keeps a live one's", async () => {
+  const { cleanupStalePartials } = await import("../src/models.ts");
+  const { spawnSync } = await import("node:child_process");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "lai-partials-"));
+  const dir = path.join(root, "khabouss", "some-model");
+  fs.mkdirSync(dir, { recursive: true });
+
+  // A pid guaranteed to no longer exist: a child process that has already exited.
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid!;
+  const deadPartial = `${dir}.partial-${dead}`;
+  fs.mkdirSync(deadPartial, { recursive: true });
+  fs.writeFileSync(path.join(deadPartial, "leftover.bin"), "x");
+
+  // This test process's own pid is, by definition, still alive.
+  const livePartial = `${dir}.partial-${process.pid}`;
+  fs.mkdirSync(livePartial, { recursive: true });
+
+  // A sibling model's partial dir must never be touched.
+  const otherModelPartial = path.join(root, "khabouss", "other-model.partial-999999999");
+  fs.mkdirSync(otherModelPartial, { recursive: true });
+
+  cleanupStalePartials(dir);
+
+  assert.equal(fs.existsSync(deadPartial), false, "the killed process's leftover dir is removed");
+  assert.equal(fs.existsSync(livePartial), true, "a concurrent, still-running install's temp dir is left alone");
+  assert.equal(fs.existsSync(otherModelPartial), true, "a different model's partial dir is never touched");
+});
+
 test("SentencePiece encoder matches the reference segmentation (if a model is cached)", async (t) => {
   const { SentencePiece } = await import("../src/spm.ts");
   const { cacheRoot } = await import("../src/models.ts");

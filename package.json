@@ -61,6 +61,6 @@
     "typescript": "^7.0.2"
   },
   "allowScripts": {
-    "onnxruntime-node@1.30.0": true
+    "onnxruntime-node": true
   }
 }
