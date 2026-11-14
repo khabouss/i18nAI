@@ -1593,7 +1593,11 @@ test("engine: sentences, placeholders, caps, punctuation, fallback", async () =>
     [tr],
     { sourceLang: "en", targetLang: "fr", batchSize: 2 },
   );
-  assert.equal(translations.get("Hello {name}. Bye."), "«Hello {name}». «Bye».");
+  // Translated as one whole string (not two separate sentence calls), since the fake
+  // translator's output still segments into exactly two sentences — nothing looks
+  // dropped, so the engine prefers it over the per-sentence path (see below for what
+  // happens when it doesn't).
+  assert.equal(translations.get("Hello {name}. Bye."), "«Hello {name}. Bye».");
   assert.equal(translations.get("SAVE"), "«SAVE»");
   assert.equal(translations.get("Settings"), "«Settings»", "no trailing period added to labels");
   assert.equal(translations.get("{{count}}"), "{{count}}", "placeholder-only strings are copied");
@@ -1601,6 +1605,32 @@ test("engine: sentences, placeholders, caps, punctuation, fallback", async () =>
   assert.ok(issues.some((i) => i.kind === "placeholder-fallback"));
   const fb = translations.get("keep __P0__ drop {a} {b}")!;
   assert.ok(fb.includes("{a}") && fb.includes("{b}"), fb);
+});
+
+test("engine: a multi-sentence string is translated whole, keeping its own separator (newline) between the translated sentences", async () => {
+  const tr = fakeTranslator((s) => s.toUpperCase());
+  const { translations } = await translateStrings(["First sentence.\nSecond sentence."], [tr], {
+    sourceLang: "en",
+    targetLang: "fr",
+    batchSize: 2,
+  });
+  assert.equal(translations.get("First sentence.\nSecond sentence."), "FIRST SENTENCE.\nSECOND SENTENCE.");
+});
+
+test("engine: a whole-string translation that drops a sentence falls back to translating each sentence on its own", async () => {
+  const tr = fakeTranslator((s) => {
+    const sentences = s.split(". ");
+    // Simulates OPUS-MT silently dropping every sentence but the first when given the
+    // whole, joined multi-sentence input (see segment.ts) — a single sentence sent on
+    // its own still translates correctly.
+    return sentences.length > 1 ? sentences[0] + "." : s.toUpperCase();
+  });
+  const { translations } = await translateStrings(["Alpha one. Beta two."], [tr], {
+    sourceLang: "en",
+    targetLang: "fr",
+    batchSize: 2,
+  });
+  assert.equal(translations.get("Alpha one. Beta two."), "ALPHA ONE. BETA TWO.");
 });
 
 test("glossary: built-in UI terms, project overrides, casing and punctuation", async () => {

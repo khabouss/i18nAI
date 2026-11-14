@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.15
+
+- **Sentence-splitting lost cross-sentence grammatical agreement** — each sentence of a multi-sentence string was translated independently, so a pronoun in a later sentence couldn't agree with a noun's gender from an earlier one (en→fr "Your export is ready. It will be..." gave "Il sera...", not the correct "Elle sera...", since "exportation" is feminine). A multi-sentence string is now translated as a whole first, and only falls back to the existing per-sentence path when the result looks like it dropped or merged a sentence — the exact failure mode per-sentence translation exists to avoid in the first place ([khabouss/locale-ai#24](https://github.com/khabouss/locale-ai/issues/24)).
+
 ## 0.7.14
 
 Another external review ran real translations against the cached models; one confirmed decoder bug plus several robustness, hygiene and format issues, verified with reproductions before fixing ([khabouss/locale-ai#22](https://github.com/khabouss/locale-ai/issues/22)):
