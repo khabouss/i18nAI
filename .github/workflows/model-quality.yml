@@ -1,0 +1,40 @@
+name: Model quality
+
+# Runs the real end-to-end test (test/e2e.test.ts): downloads an actual model and
+# checks its translated output against known-good fixture strings, catching the
+# kind of bug unit tests never see (e.g. a decoder silently dropping a token). It's
+# a separate, non-blocking workflow rather than part of ci.yml because it needs a
+# model download and isn't something a PR's merge should be gated on.
+on:
+  schedule:
+    - cron: "17 4 * * *" # nightly, off the hour to avoid GitHub's peak-time queueing
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # Pinned to the same commit SHAs as ci.yml/release.yml, for the same reason:
+      # a tag can be moved by the action's maintainer or an attacker.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.x
+          cache: npm
+      - run: npm ci
+        env:
+          ONNXRUNTIME_NODE_INSTALL: skip
+
+      # Cached across runs so this only re-downloads the model when src/catalog.ts
+      # pins it to a different revision (or the cache is evicted).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/locale-ai
+          key: model-quality-${{ hashFiles('src/catalog.ts') }}
+
+      - run: npm run build
+      - run: npm run test:e2e
+        env:
+          LOCALE_AI_E2E: 1

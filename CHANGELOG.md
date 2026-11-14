@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.14
+
+Another external review ran real translations against the cached models; one confirmed decoder bug plus several robustness, hygiene and format issues, verified with reproductions before fixing ([khabouss/locale-ai#22](https://github.com/khabouss/locale-ai/issues/22)):
+
+- **`<unk>` tokens were silently dropped during decode**, so a target letter the model's vocab doesn't have (e.g. an uppercase accented letter) steered the beam to a different word entirely rather than just losing a character — en→fr "Are you sure you want to delete this item?" came back "Tes-vous sûr…" instead of "Voulez-vous vraiment…". Fixed by blocking `<unk>` during generation, the same way `<pad>` already is.
+- **No model-quality test ran in CI** — the e2e suite is opt-in locally, so a bug like the one above shipped unnoticed. Added a separate, non-blocking `model-quality.yml` workflow (nightly + manual dispatch) that caches the model and runs the real e2e suite, which now also has a dedicated regression assertion for the `<unk>` case above.
+- **`download()` had no `error` listener on its write stream** — a full disk mid-download crashed the whole process with a raw stack trace instead of a clean error.
+- **`writeFileAtomic` left its temp file behind if the rename failed** (e.g. on Windows, when antivirus or an editor has the file locked), and didn't preserve the target file's existing permissions.
+- **`HF_TOKEN` was sent to whatever `HF_ENDPOINT` is set to**, including third-party mirrors, not just huggingface.co.
+- **`cli.ts` duplicated `ensureInstalled`, `fileKey` and `catalogFor` from `api.ts`**, and `accept` existed only in the CLI, not the library API. `accept()` moved to `src/api.ts` alongside `translate`/`check`; `cli.ts` now shares the API's `ensureInstalled`/`fullCatalog` instead of its own copies. Also fixed a stale header comment in `api.ts` claiming the CLI doesn't import it.
+- **`.po` collapsed its multi-line header `msgstr` to one line**, turning any single header-field edit into a whole-header diff instead of gettext's conventional one-continuation-line-per-field format.
+- **YAML put an added plural form at the end of the mapping** instead of next to its sibling keys the way JSON does, because the `yaml` package's `setIn`/`YAMLMap#set` always appends a brand-new key at the end regardless of where it belongs.
+- **The ICU `one` branch kept the plural noun** (fr: `one {# fichiers}` instead of `# fichier`) — the existing literal-"1" fix for i18next `_one` keys wasn't applied to ICU plurals. Extended to cover ICU `plural` "one" branches too.
+- README's demo output still showed `locale-ai 0.7.11`; updated to this version.
+
+Also investigated, and deliberately **not** shipped this round (see the issue for why): a "near-identical" brand-name warning (false-positive rate too high — it can't tell a botched respelling from a correct short cognate translation), a plural-form lexical mismatch between grammatical categories translated without shared context, and sentence-splitting losing cross-sentence grammatical context (needs a real interface change, not a local fix). tu/vous mixing, also flagged by the same review, turned out to be an artifact of the `<unk>` bug above and no longer reproduces.
+
 ## 0.7.13
 
 - **`pendingStrings` and `translatedPaths` ran the same recursive tree walk twice** — once per file when building each locale's job, once again later when writing it — over identical inputs, differing only in whether they collected the string value or its key path. Merged into one shared walk (`pendingEntries`, returning `{path, value}` pairs); `src/api.ts` now reuses the first walk's paths instead of recomputing them, so each file is walked once per run instead of twice ([khabouss/locale-ai#20](https://github.com/khabouss/locale-ai/issues/20)).

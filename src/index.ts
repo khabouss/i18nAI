@@ -1,12 +1,15 @@
 /**
- * locale-ai's programmatic API: everything `locale-ai translate`/`locale-ai check`
- * do, callable from code instead of a shell. See README.md's "Library API" section
- * for usage; `src/cli.ts` is the thin command-line wrapper around the same two
- * functions.
+ * locale-ai's programmatic API: everything `locale-ai translate`/`locale-ai check`/
+ * `locale-ai accept` do, callable from code instead of a shell. See README.md's
+ * "Library API" section for usage; `src/cli.ts` is the thin command-line wrapper
+ * around these same functions.
  */
 export {
+  accept,
   check,
   translate,
+  type AcceptOptions,
+  type AcceptResult,
   type CheckIssue,
   type CheckLocaleResult,
   type CheckOptions,

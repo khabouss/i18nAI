@@ -114,6 +114,14 @@ class Parser {
 export interface IcuUnits {
   /** Texts to translate (may contain simple `{args}` and `{__HASH__}`). */
   units: string[];
+  /**
+   * Index into `units` of each cardinal `plural` choice's "one" option body (when
+   * that body is plain text, not a further nested choice) — the ICU analogue of an
+   * i18next "_one" key: grammatically singular text whose masked `{__HASH__}` carries
+   * no number of its own, so it qualifies for the same literal-"1" retranslation fix
+   * (see `fixSingularGrammar`/`fixIcuOneUnits` in engine.ts).
+   */
+  oneUnitIndexes: number[];
   rebuild(translations: string[]): string;
 }
 
@@ -128,16 +136,25 @@ export function extractIcu(s: string): IcuUnits | undefined {
     return undefined;
   }
   const units: string[] = [];
+  const oneUnitIndexes: number[] = [];
   const collect = (list: Node[]) => {
     for (const n of list) {
       if (n.kind === "text") units.push(n.value);
-      else n.options.forEach((o) => collect(o.body));
+      else {
+        for (const o of n.options) {
+          if (n.type === "plural" && o.key === "one" && o.body.length === 1 && o.body[0].kind === "text") {
+            oneUnitIndexes.push(units.length);
+          }
+          collect(o.body);
+        }
+      }
     }
   };
   collect(nodes);
 
   return {
     units,
+    oneUnitIndexes,
     rebuild(translations) {
       let i = 0;
       const render = (list: Node[]): string =>

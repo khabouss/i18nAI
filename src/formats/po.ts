@@ -199,7 +199,14 @@ export function readPoDoc(file: string, text: string, isSource: boolean, fuzzy: 
         const header = existingHeader
           ? existingHeader.msgstr
           : e.msgstr.replace(/^Language:.*$/m, `Language: ${targetTag}`).replace(/^Plural-Forms:.*$/m, `Plural-Forms: ${pluralFormsHeader(targetTag)}`);
-        lines.push(`msgstr "${escapeC(header)}"`);
+        // gettext convention: msgstr "" followed by one continuation-string literal per
+        // header field, each still ending in its own "\n" — not every field escaped into
+        // a single line, which is valid .po but turns any one field's edit into a
+        // whole-header diff instead of a one-line one.
+        const fields = header.split("\n");
+        if (fields.at(-1) === "") fields.pop();
+        if (fields.length > 1) lines.push(`msgstr ""`, ...fields.map((f) => `"${escapeC(f + "\n")}"`));
+        else lines.push(`msgstr "${escapeC(header)}"`);
         blocks.push(lines.join("\n"));
         continue;
       }

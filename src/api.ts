@@ -1,11 +1,11 @@
 /**
- * Programmatic entry point: the same translate/check pipeline `src/cli.ts` drives,
- * usable from code instead of a shell — a build script that translates locale files
- * as part of its own pipeline, or a test that runs `check` in-process rather than via
- * `execFileSync`. `src/cli.ts` itself is unaffected: it still owns its own argv
- * parsing, interactive prompts and terminal progress bars; nothing here is imported
- * by it (nor should it import `cli.ts`, whose top-level `main()` call would otherwise
- * run on import).
+ * Programmatic entry point: the same translate/check/accept pipeline `src/cli.ts`
+ * drives, usable from code instead of a shell — a build script that translates
+ * locale files as part of its own pipeline, or a test that runs `check` in-process
+ * rather than via `execFileSync`. `src/cli.ts` itself imports `translate`/`check`/
+ * `accept`/`ensureInstalled` from here, but still owns its own argv parsing,
+ * interactive prompts and terminal progress bars on top; this file should never
+ * import `cli.ts`, whose top-level `main()` call would otherwise run on import.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -37,12 +37,12 @@ import { install, isInstalled, loadTranslator, localModelProblem, planInstall, t
 import { hasTranslatableText, mask } from "./placeholders.ts";
 
 /** Built-in models plus the project's own config (which take priority) — same resolution `cli.ts` uses. */
-function fullCatalog(config: ProjectConfig, cwd: string): ModelEntry[] {
+export function fullCatalog(config: ProjectConfig, cwd: string): ModelEntry[] {
   return [...customEntries(config.models, config.dir ?? cwd), ...CATALOG];
 }
 
 /** Portable lock-file key: forward slashes, relative to `base` (the lock file's own directory). */
-const fileKey = (p: string, base: string) => path.relative(base, p).split(path.sep).join("/");
+export const fileKey = (p: string, base: string) => path.relative(base, p).split(path.sep).join("/");
 
 function staleNotEdited(lock: LockFile, lockKey: string, existing: unknown, targetTag: string): (p: string, s: string) => boolean {
   const existingFlat = new Map(flattenStrings(existing).map((e) => [e.path, e.value]));
@@ -175,7 +175,7 @@ interface TargetJob {
   unique: number;
 }
 
-async function ensureInstalled(
+export async function ensureInstalled(
   models: ModelEntry[],
   opts: Pick<TranslateOptions, "yes" | "confirmDownload" | "onEvent">,
 ): Promise<void> {
@@ -510,4 +510,73 @@ export async function check(opts: CheckOptions = {}): Promise<CheckResult> {
     locales.push({ locale: to, missing, mismatched, stale, identical, ok: !(missing || mismatched || stale) });
   }
   return { ok: locales.every((l) => l.ok), locales, issues };
+}
+
+export interface AcceptOptions {
+  cwd?: string;
+  from?: string;
+  /** Target locale(s) to accept into; every locale with an existing target file when omitted. */
+  to?: string | string[];
+  input?: string;
+  config?: string;
+  /** Accept only these key paths, unconditionally. Every path the lock currently flags as edited, otherwise. */
+  keys?: string[];
+}
+
+export interface AcceptResult {
+  /** Locales checked (resolved from `to`, or every existing target next to `from` when omitted). */
+  locales: string[];
+  /** Total keys accepted across all locales. */
+  accepted: number;
+  lockFile: string;
+}
+
+/**
+ * Approves the current on-disk target text as this tool's own, so a future
+ * `translate`/`check` run stops reporting it under the "edited" issue kind. With
+ * explicit `keys`, those keys are accepted unconditionally (an explicit ask always
+ * wins). With no keys given, only paths the lock currently flags as edited are
+ * accepted — NOT every key the target and source share, which would also silently
+ * accept a genuinely outdated (source changed since translated) entry nobody
+ * reviewed, defeating `check`'s staleness check. The target file is never touched;
+ * only the lock's record of what this tool last wrote there is advanced to match,
+ * the same as if it had just (re)written that exact text itself. The same thing
+ * `locale-ai accept` runs, as a plain function.
+ */
+export async function accept(opts: AcceptOptions = {}): Promise<AcceptResult> {
+  const cwd = opts.cwd ?? process.cwd();
+  const from = parseLocale(opts.from ?? "en");
+  const config = loadConfig(cwd, opts.config);
+  const layout = detectLayout(cwd, from.tag, opts.input);
+  const lockDir = config.configFile ? path.dirname(config.configFile) : layout.root;
+  const lockPath = path.resolve(lockDir, LOCK_FILENAME);
+  const lock = loadLock(lockPath);
+  const tags = opts.to
+    ? (Array.isArray(opts.to) ? opts.to : [opts.to]).map((t) => parseLocale(t).tag)
+    : existingTargets(layout, from.tag);
+  if (!tags.length) return { locales: [], accepted: 0, lockFile: lockPath };
+  const wanted = opts.keys?.length ? new Set(opts.keys) : undefined;
+  const sources = sourceFiles(layout, from.tag).map((f) => ({ file: f, doc: readLocaleDoc(f, from.tag, true) }));
+
+  let accepted = 0;
+  for (const to of tags) {
+    for (const { file, doc } of sources) {
+      const target = targetFile(layout, from.tag, to, file);
+      if (!fs.existsSync(target)) continue;
+      const lockKey = fileKey(file, lockDir);
+      const srcByPath = new Map(flattenStrings(doc.data).map((e) => [e.path, e.value]));
+      // A plural-derived path (e.g. "item_few") has no source counterpart at all — the
+      // same self-referential source==written convention `translate` records it with
+      // is used here too, so accepting one of these actually clears its
+      // "conflict"/"edited" status instead of silently matching nothing.
+      const entries = flattenStrings(readLocaleDoc(target, to).data)
+        .filter((e) => (wanted ? wanted.has(e.path) : isEdited(lock, lockKey, e.path, to, e.value)))
+        .map((e) => ({ path: e.path, source: srcByPath.get(e.path) ?? e.value, written: e.value }));
+      if (!entries.length) continue;
+      recordEntries(lock, lockKey, to, entries);
+      accepted += entries.length;
+    }
+  }
+  saveLock(lockPath, lock);
+  return { locales: tags, accepted, lockFile: lockPath };
 }
