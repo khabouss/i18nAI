@@ -414,17 +414,34 @@ export function keyPathProtect(doNotTranslateKeys: string[] | undefined): ((path
   return (path: string) => keys.some((k) => path === k || path.startsWith(`${k}.`) || path.startsWith(`${k}[`));
 }
 
-export function pendingStrings(
+/** A leaf string that needs (re)translation this run, with its key path. */
+export interface PendingEntry {
+  path: string;
+  value: string;
+}
+
+/**
+ * Walks `source` against `existing`, collecting every leaf string that needs
+ * (re)translation this run: not protected, and either not-yet-translated (or
+ * overwrite-forced) or stale. Also the key paths `buildTarget` will call
+ * `translate` for, given the same inputs — used to limit lock-file updates to
+ * paths actually (re)translated this run, so a path left untouched (already
+ * translated, not stale) never has its recorded "last written" hash
+ * overwritten with text buildTarget didn't itself write — which is what let a
+ * translator's hand edit be silently adopted as this tool's own baseline on a
+ * prior run. One shared walk for both needs, rather than running it twice.
+ */
+export function pendingEntries(
   source: unknown,
   existing: unknown,
   overwrite: boolean,
   isProtected?: (path: string) => boolean,
   isStale?: (path: string, source: string) => boolean,
-): string[] {
-  const out: string[] = [];
+): PendingEntry[] {
+  const out: PendingEntry[] = [];
   const visit = (s: unknown, e: unknown, path: string): void => {
     if (typeof s === "string") {
-      if (!isProtected?.(path) && (needsTranslation(e, overwrite) || !!isStale?.(path, s))) out.push(s);
+      if (!isProtected?.(path) && (needsTranslation(e, overwrite) || !!isStale?.(path, s))) out.push({ path, value: s });
     } else if (Array.isArray(s)) {
       s.forEach((v, i) => visit(v, Array.isArray(e) ? e[i] : undefined, `${path}[${i}]`));
     } else if (isObj(s)) {
@@ -435,34 +452,15 @@ export function pendingStrings(
   return out;
 }
 
-/**
- * Key paths `buildTarget` will call `translate` for, given the same inputs —
- * i.e. the paths actually (re)translated this run, as opposed to every path
- * in the source. Used to limit lock-file updates to those paths, so a path
- * left untouched (already translated, not stale) never has its recorded
- * "last written" hash overwritten with text buildTarget didn't itself write —
- * which is what let a translator's hand edit be silently adopted as this
- * tool's own baseline on a prior run.
- */
-export function translatedPaths(
+/** Just the values from {@link pendingEntries} — the strings sent to the translator. */
+export function pendingStrings(
   source: unknown,
   existing: unknown,
   overwrite: boolean,
   isProtected?: (path: string) => boolean,
   isStale?: (path: string, source: string) => boolean,
 ): string[] {
-  const out: string[] = [];
-  const visit = (s: unknown, e: unknown, path: string): void => {
-    if (typeof s === "string") {
-      if (!isProtected?.(path) && (needsTranslation(e, overwrite) || !!isStale?.(path, s))) out.push(path);
-    } else if (Array.isArray(s)) {
-      s.forEach((v, i) => visit(v, Array.isArray(e) ? e[i] : undefined, `${path}[${i}]`));
-    } else if (isObj(s)) {
-      for (const k of Object.keys(s)) visit(s[k], isObj(e) ? e[k] : undefined, path ? `${path}.${k}` : k);
-    }
-  };
-  visit(source, existing, "");
-  return out;
+  return pendingEntries(source, existing, overwrite, isProtected, isStale).map((e) => e.value);
 }
 
 /**

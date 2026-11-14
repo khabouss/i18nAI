@@ -24,12 +24,11 @@ import {
   existingTargets,
   flattenStrings,
   keyPathProtect,
-  pendingStrings,
+  pendingEntries,
   pluralOneStrings,
   readLocaleDoc,
   sourceFiles,
   targetFile,
-  translatedPaths,
   usesI18nextPlurals,
   type Layout,
   type LocaleDoc,
@@ -166,6 +165,7 @@ interface FileJob {
   doc: LocaleDoc;
   existing: unknown;
   pending: string[];
+  pendingPaths: string[];
 }
 
 interface TargetJob {
@@ -249,12 +249,14 @@ export async function translate(opts: TranslateOptions): Promise<TranslateResult
       const target = targetFile(layout, from.tag, locale.tag, file);
       const existing = fs.existsSync(target) ? readLocaleDoc(target, locale.tag).data : undefined;
       const isStale = staleNotEdited(lock, fileKey(file, lockDir), existing, locale.tag);
+      const entries = pendingEntries(doc.data, existing, opts.overwrite ?? false, isProtectedKey, isStale);
       return {
         source: file,
         target,
         doc,
         existing,
-        pending: pendingStrings(doc.data, existing, opts.overwrite ?? false, isProtectedKey, isStale),
+        pending: entries.map((e) => e.value),
+        pendingPaths: entries.map((e) => e.path),
       };
     });
     const unique = new Set(files.flatMap((f) => f.pending)).size;
@@ -342,7 +344,7 @@ export async function translate(opts: TranslateOptions): Promise<TranslateResult
         }
       }
       const built = buildTarget(f.doc.data, f.existing, (s) => translations.get(s) ?? s, opts.overwrite ?? false, isProtectedKey, isStale);
-      const translatedSet = new Set(translatedPaths(f.doc.data, f.existing, opts.overwrite ?? false, isProtectedKey, isStale));
+      const translatedSet = new Set(f.pendingPaths);
       const pluralOpts = {
         otherStale: (p: string) => translatedSet.has(p),
         isEdited: (p: string, v: string) => isEdited(lock, lockKey, p, job.locale.tag, v),

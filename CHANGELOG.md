@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.13
+
+- **`pendingStrings` and `translatedPaths` ran the same recursive tree walk twice** — once per file when building each locale's job, once again later when writing it — over identical inputs, differing only in whether they collected the string value or its key path. Merged into one shared walk (`pendingEntries`, returning `{path, value}` pairs); `src/api.ts` now reuses the first walk's paths instead of recomputing them, so each file is walked once per run instead of twice ([khabouss/locale-ai#20](https://github.com/khabouss/locale-ai/issues/20)).
+
 ## 0.7.12
 
 Five more confirmed bugs, plus three doc/config hygiene items, from the same external review ([khabouss/locale-ai#18](https://github.com/khabouss/locale-ai/issues/18)):
