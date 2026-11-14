@@ -54,6 +54,21 @@ function isPnpmVirtualStore(onnxRoot) {
   return onnxRoot.split(path.sep).includes(".pnpm");
 }
 
+/**
+ * True when `dirent` (inside `parentDir`) is a directory OR a symlink to one — npm/yarn
+ * workspaces and `npm link` represent a linked sibling package as a symlink, and
+ * `Dirent.isDirectory()` alone reports `false` for those, making them invisible below.
+ */
+function isDirLike(parentDir, dirent) {
+  if (dirent.isDirectory()) return true;
+  if (!dirent.isSymbolicLink()) return false;
+  try {
+    return fs.statSync(path.join(parentDir, dirent.name)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** Any OTHER package in `nodeModulesDir` that itself depends on onnxruntime-node. */
 function hasOtherConsumer(nodeModulesDir) {
   let entries;
@@ -63,10 +78,11 @@ function hasOtherConsumer(nodeModulesDir) {
     return false;
   }
   for (const e of entries) {
-    if (!e.isDirectory() || e.name === 'onnxruntime-node' || e.name === '.bin') continue;
+    if (!isDirLike(nodeModulesDir, e) || e.name === 'onnxruntime-node' || e.name === '.bin') continue;
+    const scopeDir = path.join(nodeModulesDir, e.name);
     const names = e.name.startsWith('@')
-      ? fs.readdirSync(path.join(nodeModulesDir, e.name), { withFileTypes: true })
-          .filter((s) => s.isDirectory())
+      ? fs.readdirSync(scopeDir, { withFileTypes: true })
+          .filter((s) => isDirLike(scopeDir, s))
           .map((s) => `${e.name}/${s.name}`)
       : [e.name];
     for (const name of names) {

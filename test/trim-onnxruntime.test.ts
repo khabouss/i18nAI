@@ -32,6 +32,29 @@ test("hasOtherConsumer: finds a sibling package that depends on onnxruntime-node
   assert.equal(hasOtherConsumer(dir), true);
 });
 
+test("hasOtherConsumer: finds a workspace/npm-link sibling even though it's a symlink, not a real directory", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-trim-symlink-"));
+  fs.mkdirSync(path.join(dir, "onnxruntime-node"));
+
+  // The real package lives elsewhere (as it does for a workspace member or `npm link`
+  // target); only a symlink to it sits inside this node_modules. Dirent.isDirectory()
+  // reports false for a symlink, which is exactly the gap being fixed here.
+  const real = fs.mkdtempSync(path.join(os.tmpdir(), "lai-trim-symlink-target-"));
+  fs.writeFileSync(path.join(real, "package.json"), JSON.stringify({ name: "some-gpu-pkg", dependencies: { "onnxruntime-node": "1.0.0" } }));
+  fs.symlinkSync(real, path.join(dir, "some-gpu-pkg"), "dir");
+
+  assert.equal(hasOtherConsumer(dir), true);
+
+  // Same gap one level deeper, for a scoped package symlinked under its @scope directory.
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "lai-trim-symlink-scoped-"));
+  fs.mkdirSync(path.join(dir2, "onnxruntime-node"));
+  fs.mkdirSync(path.join(dir2, "@scope"));
+  const realScoped = fs.mkdtempSync(path.join(os.tmpdir(), "lai-trim-symlink-scoped-target-"));
+  fs.writeFileSync(path.join(realScoped, "package.json"), JSON.stringify({ name: "@scope/gpu-pkg", dependencies: { "onnxruntime-node": "1.0.0" } }));
+  fs.symlinkSync(realScoped, path.join(dir2, "@scope", "gpu-pkg"), "dir");
+  assert.equal(hasOtherConsumer(dir2), true);
+});
+
 test("rootDependsOnOnnx: a consuming project's own direct dependency on onnxruntime-node is detected, but locale-ai's own repo isn't mistaken for one", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lai-trim-root-"));
   const nodeModulesDir = path.join(dir, "node_modules");

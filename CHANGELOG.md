@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.12
+
+Five more confirmed bugs, plus three doc/config hygiene items, from the same external review ([khabouss/locale-ai#18](https://github.com/khabouss/locale-ai/issues/18)):
+
+- **The onnxruntime-node trimmer's "other consumer" check missed a symlinked sibling** — `Dirent.isDirectory()` reports `false` for a symlink, which is exactly how npm/yarn workspaces and `npm link` represent a linked package. A real consumer linked that way was invisible to the check, risking its binaries being deleted. It now follows symlinks (one level, and one level deeper for a scoped `@scope/pkg`) before deciding.
+- **Model downloads had no timeout.** A stalled connection — at connect time or mid-transfer — could hang indefinitely. Downloads now abort after 30s with no data, which also triggers the existing per-file retry.
+- **No way to download a private or gated Hugging Face model, and a 401 was reported as "Not found."** `HF_TOKEN`, if set, is now sent as a Bearer token, and a 401/403 gets its own, accurate message instead of being folded into the 404 case.
+- **A killed process left its `.partial-<pid>` temp dir behind forever** — cleanup only ran in `install()`'s own `catch` block, which a `SIGKILL` skips entirely. Every install now also removes any sibling `.partial-<pid>` dir whose process is no longer running, before starting its own.
+- **The final `rm(dir)` then `rename(tmp, dir)` swap left a window where `dir` was briefly missing entirely** — however long the `rm` took. It's now a rename-aside, rename-into-place, remove-the-old-one sequence instead, shrinking that window to two near-instant renames.
+- **`.npmrc`'s `onnxruntime-node-install=skip` isn't a real npm config key**, so every `npm` invocation printed an "Unknown project config" warning. Removed in favor of setting `ONNXRUNTIME_NODE_INSTALL=skip` directly — the mechanism the README already recommends for an end-user install — in CI and in CONTRIBUTING's own setup instructions.
+- **`package.json`'s `allowScripts` pinned an exact `onnxruntime-node@1.30.0`** while the dependency itself is `^1.30.0`; any newer compatible install would've silently fallen outside the allowlist. Changed to a name-only key, trusting any version of the package the way the dependency range already does.
+- **README/CONTRIBUTING had three stale figures**: a demo output showing `locale-ai 0.6.3`, a post-trim install size given as both "~51 MB" and "~45 MB" (the real, measured number — confirmed again now — is ~45 MB), and an e2e-download-size comment/doc still saying "~115 MB" from before `tc-big` became the default `en-fr` model (it's ~345 MB now). `SECURITY.md` also now notes the two cases its "pinned and verified" guarantee doesn't cover: a project's own custom (unpinned) model config, and a custom `HF_ENDPOINT` serving both the file and the checksum that verifies it.
+
 ## 0.7.11
 
 Five more confirmed bugs from the same external review, verified with reproductions before fixing ([khabouss/locale-ai#16](https://github.com/khabouss/locale-ai/issues/16)):

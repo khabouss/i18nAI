@@ -127,23 +127,36 @@ export interface InstallPlan {
   decoder: string;
 }
 
+/** Connect/response timeout for a single attempt when the caller isn't managing its own signal (planInstall's small JSON calls). A download's own stall timeout (see `download`) covers the whole, potentially long-running, body transfer instead. */
+const CONNECT_TIMEOUT_MS = 30_000;
+
+function requestHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { "user-agent": "locale-ai" };
+  if (process.env.HF_TOKEN) headers.authorization = `Bearer ${process.env.HF_TOKEN}`;
+  return headers;
+}
+
 async function getJson(url: string): Promise<unknown> {
   const res = await fetchWithRetry(url);
   return res.json();
 }
 
-async function fetchWithRetry(url: string, attempts = 3): Promise<Response> {
+async function fetchWithRetry(url: string, attempts = 3, signal?: AbortSignal): Promise<Response> {
   let last: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
-      const res = await fetch(url, { headers: { "user-agent": "locale-ai" } });
+      const res = await fetch(url, { headers: requestHeaders(), signal: signal ?? AbortSignal.timeout(CONNECT_TIMEOUT_MS) });
       if (res.ok) return res;
-      if (res.status === 404 || res.status === 401) throw new Error(`Not found: ${url}`);
+      if (res.status === 404) throw new Error(`Not found: ${url}`);
+      if (res.status === 401 || res.status === 403) {
+        throw new Error(`${url} requires authentication (HTTP ${res.status}). If this is a private or gated model, set HF_TOKEN.`);
+      }
       last = new Error(`HTTP ${res.status} for ${url}`);
     } catch (e) {
-      if (e instanceof Error && e.message.startsWith("Not found")) throw e;
+      if (e instanceof Error && (e.message.startsWith("Not found") || e.message.includes("requires authentication"))) throw e;
       last = e;
     }
+    if (signal?.aborted) break;
     await new Promise((r) => setTimeout(r, 500 * 2 ** i));
   }
   let host: string;
@@ -211,30 +224,81 @@ async function matches(p: string, file: RemoteFile): Promise<boolean> {
   }
 }
 
+/** No bytes (connect included) for this long is treated as a dead connection, not a slow one. */
+const STALL_TIMEOUT_MS = 30_000;
+
 async function download(url: string, dest: string, file: RemoteFile, onBytes: (n: number) => void): Promise<void> {
-  const res = await fetchWithRetry(url);
-  if (!res.body) throw new Error(`Empty response for ${url}`);
-  await fsp.mkdir(path.dirname(dest), { recursive: true });
-  const hash = newHash(file);
-  const out = fs.createWriteStream(dest);
-  let written = 0;
+  const controller = new AbortController();
+  let stallTimer: NodeJS.Timeout | undefined;
+  const resetStallTimer = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(
+      () => controller.abort(new Error(`stalled: no data received for ${STALL_TIMEOUT_MS / 1000}s`)),
+      STALL_TIMEOUT_MS,
+    );
+  };
+  resetStallTimer();
   try {
-    for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
-      hash.update(chunk);
-      written += chunk.length;
-      onBytes(chunk.length);
-      if (!out.write(chunk)) await new Promise((r) => out.once("drain", r));
+    const res = await fetchWithRetry(url, 3, controller.signal);
+    if (!res.body) throw new Error(`Empty response for ${url}`);
+    await fsp.mkdir(path.dirname(dest), { recursive: true });
+    const hash = newHash(file);
+    const out = fs.createWriteStream(dest);
+    let written = 0;
+    try {
+      for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
+        resetStallTimer();
+        hash.update(chunk);
+        written += chunk.length;
+        onBytes(chunk.length);
+        if (!out.write(chunk)) await new Promise((r) => out.once("drain", r));
+      }
+    } finally {
+      await new Promise<void>((resolve, reject) => out.end((err?: Error | null) => (err ? reject(err) : resolve())));
+    }
+    if (written !== file.size || hash.digest("hex") !== (file.sha256 ?? file.gitSha1)) {
+      throw new Error(`Checksum mismatch for ${file.path} (got ${written} bytes). Please retry.`);
     }
   } finally {
-    await new Promise<void>((resolve, reject) => out.end((err?: Error | null) => (err ? reject(err) : resolve())));
+    clearTimeout(stallTimer);
   }
-  if (written !== file.size || hash.digest("hex") !== (file.sha256 ?? file.gitSha1)) {
-    throw new Error(`Checksum mismatch for ${file.path} (got ${written} bytes). Please retry.`);
+}
+
+/** True when a process with this pid is still running (used to tell a live install's temp dir apart from one a killed process left behind). */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Removes any `.partial-<pid>` dir next to `dir` left by a process that no longer exists — a previous install killed mid-download, which never reaches the `catch` cleanup below. Never removes one whose pid is still alive, so a genuinely concurrent install isn't disturbed. */
+export function cleanupStalePartials(dir: string): void {
+  const parent = path.dirname(dir);
+  const prefix = `${path.basename(dir)}.partial-`;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(parent);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (!name.startsWith(prefix)) continue;
+    const pid = Number(name.slice(prefix.length));
+    if (Number.isInteger(pid) && pid > 0 && pidAlive(pid)) continue;
+    try {
+      fs.rmSync(path.join(parent, name), { recursive: true, force: true });
+    } catch {
+      // best-effort cleanup only
+    }
   }
 }
 
 export async function install(plan: InstallPlan, onProgress?: (done: number, total: number) => void): Promise<void> {
   const dir = modelDir(plan.model);
+  cleanupStalePartials(dir);
   const tmp = `${dir}.partial-${process.pid}`;
   await fsp.rm(tmp, { recursive: true, force: true });
   await fsp.mkdir(tmp, { recursive: true });
@@ -275,8 +339,20 @@ export async function install(plan: InstallPlan, onProgress?: (done: number, tot
       decoder: plan.decoder,
     };
     await fsp.writeFile(path.join(tmp, MANIFEST), JSON.stringify(manifest, null, 2));
-    await fsp.rm(dir, { recursive: true, force: true });
+    // Move the old dir aside (an instant rename) rather than `rm` it before renaming
+    // `tmp` into place: `rm`-ing a large directory first leaves a window — however
+    // long that takes — where another process (or this one, reading concurrently)
+    // sees `dir` missing entirely. Renaming it aside first shrinks that window to the
+    // time between two renames, each effectively instantaneous.
+    const old = `${dir}.old-${process.pid}`;
+    await fsp.rm(old, { recursive: true, force: true });
+    try {
+      await fsp.rename(dir, old);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    }
     await fsp.rename(tmp, dir);
+    await fsp.rm(old, { recursive: true, force: true });
   } catch (e) {
     await fsp.rm(tmp, { recursive: true, force: true });
     throw e;

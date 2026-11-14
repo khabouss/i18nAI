@@ -1,5 +1,5 @@
 /**
- * End-to-end test with real models. Downloads ~115 MB on first run.
+ * End-to-end test with real models. Downloads ~345 MB on first run (en-fr, tc-big).
  * Run with: npm run test:e2e
  */
 import assert from "node:assert/strict";
